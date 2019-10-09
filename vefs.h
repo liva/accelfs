@@ -6,12 +6,14 @@
 #include <list>
 #include <memory>
 #include <atomic>
-#include <vector>
+#include <deque>
 #include <vepci.h>
+#include <vector>
+#include <string.h>
 
 #include <stdint.h>
 extern uint64_t tmp_var;
-static inline uint64_t ve_get()
+static inline uint64_t ve_gettime()
 {
   uint64_t ret;
   void *vehva = ((void *)0x000000001000);
@@ -24,7 +26,7 @@ static inline uint64_t ve_get()
 //#define nvme_printf(...) printf(__VA_ARGS__)
 #define nvme_printf(...)
 
-static const size_t kFileSizeMax = 20L * 1024 * 1024 * 1024;
+static const size_t kFileSizeMax = 2L * 1024 * 1024 /* * 1024*/;
 
 class Vefs;
 
@@ -40,7 +42,8 @@ public:
   struct AsyncIoContext
   {
     unvme_iod_t iod;
-    void *buf;
+    vfio_dma_t *dma;
+    uint64_t time;
   };
   // TODO: qid would not work on multi thread
   Inode(std::string fname, u32 index, int lock, size_t len, int deleted, const unvme_ns_t *ns, size_t blocksize, int qid) : ns_(ns) /*, append_cache_(ns)*/, qid_(qid), cache_(ns_)
@@ -149,9 +152,9 @@ public:
   }
   Status RefreshCache(char *buf, u32 index)
   {
-    if (!cache_.buf_)
+    if (!cache_.dma_)
     {
-      cache_.buf_ = unvme_alloc(ns_, ns_->blocksize);
+      cache_.dma_ = unvme_alloc(ns_, ns_->blocksize);
     }
     else if (cache_.index_ != index)
     {
@@ -161,17 +164,17 @@ public:
       }
     }
     cache_.index_ = index;
-    memcpy(cache_.buf_, buf, ns_->blocksize);
+    memcpy(cache_.dma_->buf, buf, ns_->blocksize);
     cache_.needs_written = true;
     return Status::kOk;
   }
   Status CacheWrite(bool no_memcpy)
   {
-    if (!cache_.buf_ || !cache_.needs_written)
+    if (!cache_.dma_ || !cache_.needs_written)
     {
       return Status::kOk;
     }
-    unvme_iod_t iod = unvme_awrite(ns_, qid_, cache_.buf_, cache_.index_, 1);
+    unvme_iod_t iod = unvme_awrite(ns_, qid_, cache_.dma_->buf, cache_.index_, 1);
     if (!iod)
     {
       fprintf(stderr, "VEFS: cache awrite failed\n");
@@ -179,23 +182,23 @@ public:
     }
     Inode::AsyncIoContext ctx = {
         .iod = iod,
-        .buf = cache_.buf_,
+        .dma = cache_.dma_,
+        .time = ve_gettime(),
     };
-    void *nbuf = unvme_alloc(ns_, ns_->blocksize);
+    vfio_dma_t *ndma = unvme_alloc(ns_, ns_->blocksize);
     if (!no_memcpy)
     {
-      memcpy(nbuf, cache_.buf_, ns_->blocksize);
+      memcpy(ndma->buf, cache_.dma_->buf, ns_->blocksize);
     }
-    cache_.buf_ = nbuf;
+    cache_.dma_ = ndma;
     RegisterWaitingContext(ctx);
-    cache_.needs_written = false;
     return Status::kOk;
   }
   bool ReuseCache(char *buf, u32 lba)
   {
-    if (cache_.buf_ && cache_.index_ == lba)
+    if (cache_.dma_ && cache_.index_ == lba)
     {
-      memcpy(buf, cache_.buf_, blocksize_);
+      memcpy(buf, cache_.dma_->buf, blocksize_);
       cache_.needs_written = false;
       return true;
     }
@@ -203,13 +206,46 @@ public:
   }
   void ApplyCache(void *buf, u32 lba, u32 nlb)
   {
-    if (!cache_.buf_)
+    if (!cache_.dma_)
     {
       return;
     }
     if (lba <= cache_.index_ && cache_.index_ < lba + nlb)
     {
-      memcpy(reinterpret_cast<char *>(buf) + (cache_.index_ - lba) * blocksize_, cache_.buf_, blocksize_);
+      memcpy(reinterpret_cast<char *>(buf) + (cache_.index_ - lba) * blocksize_, cache_.dma_->buf, blocksize_);
+    }
+  }
+  void RetrieveContexts()
+  {
+    uint64_t ctime = ve_gettime();
+    while (!io_waiting_queue_.empty())
+    {
+      auto itr = io_waiting_queue_.begin();
+      if (ctime < (*itr).time + 2 * 1000 * 1000)
+      {
+        break;
+      }
+      if (unvme_apoll((*itr).iod, UNVME_TIMEOUT))
+      {
+        printf("failed to unvme_write");
+        exit(1);
+      }
+      unvme_free(ns_, (*itr).dma);
+      io_waiting_queue_.pop_front();
+    }
+  }
+  void WaitIoCompletion()
+  {
+    while (!io_waiting_queue_.empty())
+    {
+      auto itr = io_waiting_queue_.begin();
+      if (unvme_apoll((*itr).iod, UNVME_TIMEOUT))
+      {
+        printf("failed to unvme_write");
+        exit(1);
+      }
+      unvme_free(ns_, (*itr).dma);
+      io_waiting_queue_.pop_front();
     }
   }
   bool Sync()
@@ -219,17 +255,7 @@ public:
       printf("failed to CacheWrite");
       exit(1);
     }
-    auto itr = io_waiting_queue_.begin();
-    while (itr != io_waiting_queue_.end())
-    {
-      if (unvme_apoll((*itr).iod, UNVME_TIMEOUT))
-      {
-        printf("failed to unvme_write");
-        exit(1);
-      }
-      unvme_free(ns_, (*itr).buf);
-      itr = io_waiting_queue_.erase(itr);
-    }
+    WaitIoCompletion();
     return inode_updated_;
   }
   void RegisterWaitingContext(AsyncIoContext ctx)
@@ -243,7 +269,7 @@ public:
   void Delete()
   {
     assert(!IsDeleted());
-    deleted_ = 0;
+    deleted_ = 1;
     inode_updated_ = true;
   }
   std::string &GetFname()
@@ -280,7 +306,7 @@ private:
 
   const unvme_ns_t *ns_;
   size_t blocksize_;
-  std::vector<AsyncIoContext> io_waiting_queue_;
+  std::deque<AsyncIoContext> io_waiting_queue_;
   const int qid_;
 
   bool inode_updated_;
@@ -288,20 +314,20 @@ private:
   struct Cache
   {
     u32 index_;
-    void *buf_;
+    vfio_dma_t *dma_;
     bool needs_written;
     const unvme_ns_t *ns_;
     Cache() = delete;
     Cache(const unvme_ns_t *ns) : ns_(ns)
     {
-      buf_ = nullptr;
+      dma_ = nullptr;
       needs_written = false;
     }
     ~Cache()
     {
-      if (buf_)
+      if (dma_)
       {
-        unvme_free(ns_, buf_);
+        unvme_free(ns_, dma_);
       }
     }
   };
@@ -366,8 +392,6 @@ public:
   };
   Vefs()
       : ns_(unvme_open("b3:00.0")),
-        blocksize_(ns_->blocksize),
-        file_isize_(kFileSizeMax / blocksize_),
         qcnt_(0),
         header_lock_(0)
   {
@@ -376,14 +400,9 @@ public:
       fprintf(stderr, "unsupported blocksize\n");
       exit(1);
     }
-    printf("%s qc=%d/%d qs=%d/%d bc=%#lx bs=%d\n", ns_->device, ns_->qcount,
+    printf("%s qc=%d/%d qs=%d/%d bc=%#lx bs=%d maxbpio=%d\n", ns_->device, ns_->qcount,
            ns_->maxqcount, ns_->qsize, ns_->maxqsize, ns_->blockcount,
-           ns_->blocksize);
-
-    for (int i = 0; i < 256; i++)
-    {
-      header_data_[i] = nullptr;
-    }
+           ns_->blocksize, ns_->maxbpio);
 
     if (!HeaderRead())
     {
@@ -393,9 +412,9 @@ public:
   ~Vefs()
   {
     HeaderWriteSync();
-    for (int i = 0; i < 256; i++)
+    for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
     {
-      Inode *inode = header_data_[i];
+      Inode *inode = *itr;
       if (inode != nullptr)
       {
         assert(!inode->Sync());
@@ -445,15 +464,14 @@ public:
 
   void HardWrite()
   {
-    tmp_var += 10000;
-    void *buf = unvme_alloc(ns_, 512); // dummy
-    u32 cdw10_15[6];                   // dummy
-    int stat = unvme_cmd(ns_, GetQnum(), NVME_CMD_FLUSH, ns_->id, buf, 512, cdw10_15, 0);
+    vfio_dma_t *dma = unvme_alloc(ns_, ns_->blocksize); // dummy
+    u32 cdw10_15[6];                                    // dummy
+    int stat = unvme_cmd(ns_, GetQnum(), NVME_CMD_FLUSH, ns_->id, dma->buf, 512, cdw10_15, 0);
     if (stat)
     {
       printf("failed to sync");
     }
-    unvme_free(ns_, buf);
+    unvme_free(ns_, dma);
   }
 
   Status Append(Inode *inode, const void *data, size_t size)
@@ -481,6 +499,15 @@ public:
 
   Status Write(Inode *inode, size_t offset, const void *data, size_t size)
   {
+    /*
+    printf("\nw[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
+    for (size_t i = 0; i < size; i++)
+    {
+      printf("%02x", ((char *)data)[i]);
+    }
+    printf("\n");
+    */
+    inode->RetrieveContexts();
     nvme_printf("w> %ld %ld\n", offset, size);
     size_t oldsize = inode->GetLen();
     size_t end = offset + size;
@@ -504,8 +531,8 @@ public:
     }
 
     nvme_printf("w^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, size);
-    void *buf = unvme_alloc(ns_, ndsize);
-    if (!buf)
+    vfio_dma_t *dma = unvme_alloc(ns_, ndsize);
+    if (!dma)
     {
       fprintf(stderr, "VEFS: buffer allocation error\n");
       return Status::kTryAgain;
@@ -543,7 +570,7 @@ public:
       std::vector<unvme_iod_t> preload_iod;
       for (size_t toffset : preload_offset)
       {
-        char *tbuf = reinterpret_cast<char *>(buf) + Align(toffset) - aligned_offset;
+        char *tbuf = reinterpret_cast<char *>(dma->buf) + Align(toffset) - aligned_offset;
         if (inode->ReuseCache(tbuf, inode->GetLba(toffset)))
         {
           continue;
@@ -566,11 +593,11 @@ public:
       }
     } while (0);
 
-    memcpy((u8 *)buf + offset - aligned_offset, data, size);
+    memcpy((u8 *)dma->buf + offset - aligned_offset, data, size);
 
     if (inode->GetLba(inode->GetLen()) == lba + nlb - 1)
     {
-      if (inode->RefreshCache(reinterpret_cast<char *>(buf) + ndsize - ns_->blocksize, lba + nlb - 1) != Inode::Status::kOk)
+      if (inode->RefreshCache(reinterpret_cast<char *>(dma->buf) + ndsize - ns_->blocksize, lba + nlb - 1) != Inode::Status::kOk)
       {
         fprintf(stderr, "VEFS: cache awrite failed\n");
         return Status::kIoError;
@@ -580,7 +607,7 @@ public:
 
     if (nlb != 0)
     {
-      unvme_iod_t iod = unvme_awrite(ns_, GetQnum(), buf, lba, nlb);
+      unvme_iod_t iod = unvme_awrite(ns_, GetQnum(), dma->buf, lba, nlb);
       if (!iod)
       {
         fprintf(stderr, "VEFS: awrite failed\n");
@@ -588,7 +615,8 @@ public:
       }
       Inode::AsyncIoContext ctx = {
           .iod = iod,
-          .buf = buf,
+          .dma = dma,
+          .time = ve_gettime(),
       };
       inode->RegisterWaitingContext(ctx);
     }
@@ -599,6 +627,8 @@ public:
   Status
   Read(Inode *inode, uint64_t offset, size_t n, char *scratch)
   {
+    //printf("\nr[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
+    inode->RetrieveContexts();
     size_t noffset = Align(offset);
     size_t ndsize = AlignUp(n + offset - noffset);
 
@@ -611,18 +641,23 @@ public:
     }
 
     nvme_printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-    void *buf = unvme_alloc(ns_, ndsize);
-    if (!buf)
+    vfio_dma_t *dma = unvme_alloc(ns_, ndsize);
+    if (!dma)
     {
       nvme_printf("allocation failure\n");
       return Status::kTryAgain;
     }
-    if (ReadWithIoBuf(inode, noffset, ndsize, (char *)buf) != Status::kOk)
+    if (ReadWithIoBuf(inode, noffset, ndsize, (char *)dma->buf) != Status::kOk)
     {
       return Status::kIoError;
     }
-    memcpy(scratch, (u8 *)buf + offset - noffset, n);
-    unvme_free(ns_, buf);
+    memcpy(scratch, (u8 *)dma->buf + offset - noffset, n);
+    unvme_free(ns_, dma);
+    /*for (size_t i = 0; i < n; i++)
+    {
+      printf("%02x", scratch[i]);
+    }
+    printf("\n");*/
 
     return Status::kOk;
   }
@@ -634,9 +669,6 @@ public:
       nvme_printf("IO Error\n");
       return Status::kIoError;
     }
-    // aurora_test
-    // printf("Read> %s %d %ld %ld\n", inode->fname.c_str(), inode->index,
-    // offset, n);
 
     size_t noffset = Align(offset);
     if (noffset != offset)
@@ -664,14 +696,14 @@ public:
     return Status::kOk;
   }
 
-  u16 GetBlockSize() { return blocksize_; }
+  u16 GetBlockSize() { return ns_->blocksize; }
 
   Inode *GetInode(const std::string &fname)
   {
     HeaderLock();
-    for (int i = 0; i < 256; i++)
+    for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
     {
-      Inode *inode = header_data_[i];
+      Inode *inode = *itr;
       if (inode == nullptr)
       {
         break;
@@ -706,38 +738,49 @@ public:
 
   void Rename(Inode *inode, const std::string &fname)
   {
+    if (DoesExist(fname))
+    {
+      Create(fname, false)->Delete();
+    }
     inode->Rename(fname);
   }
 
-  Inode *Create(const std::string &fname, bool lock)
+  bool DoesExist(const std::string &fname)
   {
-    Inode *rd;
-    Inode *deleted_rd = nullptr;
+    bool flag = false;
     HeaderLock();
 
-    int hindex;
-    while (true)
+    for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
     {
-      rd = header_data_[hindex];
+      Inode *rd = *itr;
       if (rd == nullptr)
       {
-        if (deleted_rd != nullptr)
-        {
-          rd = deleted_rd;
-          deleted_rd->Recreate(fname, (lock ? 1 : 0));
-        }
-        else
-        {
-          u32 index = kHeaderBlockSize / ns_->blocksize + hindex * file_isize_;
-          if (index + file_isize_ > ns_->blockcount)
-          {
-            fprintf(stderr, "tried to create files more than storage size");
-            return nullptr;
-          }
-          rd = new Inode(fname, index, (lock ? 1 : 0), 0, 0, ns_, ns_->blocksize, GetQnum());
-          header_data_[hindex] = rd;
-        }
         break;
+      }
+      if (!rd->IsDeleted() && rd->GetFname() == fname)
+      {
+        flag = true;
+        break;
+      }
+    }
+
+    HeaderUnlock();
+    return flag;
+  }
+  Inode *Create(const std::string &fname, bool lock)
+  {
+    Inode *rd = nullptr;
+    Inode *deleted_rd = nullptr;
+    u32 maxindex = 0;
+
+    HeaderLock();
+
+    for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
+    {
+      rd = *itr;
+      if (maxindex < rd->GetIndex())
+      {
+        maxindex = rd->GetIndex();
       }
       if (rd->IsDeleted())
       {
@@ -746,27 +789,61 @@ public:
           deleted_rd = rd;
         }
       }
-      else
+      else if (rd->GetFname() == fname)
       {
-        if (rd->GetFname() == fname)
-        {
-          HeaderUnlock();
-          return rd;
-        }
+        break;
       }
-      if (hindex >= 256)
-      {
-        fprintf(stderr, "tried to create files more than supported by FS");
-        return nullptr;
-      }
-      hindex++;
+      rd = nullptr;
     }
 
-    // aurora_test
-    // printf("Create>>%s %d %d %p\n", fname.c_str(), index, lock, rd);
-
+    if (rd == nullptr)
+    {
+      if (deleted_rd != nullptr)
+      {
+        rd = deleted_rd;
+        deleted_rd->Recreate(fname, (lock ? 1 : 0));
+      }
+      else
+      {
+        u32 index = kHeaderBlockSize / ns_->blocksize + (maxindex + 1) * GetBlockNumFromSize(kFileSizeMax);
+        if (index + GetBlockNumFromSize(kFileSizeMax) > ns_->blockcount)
+        {
+          fprintf(stderr, "tried to create files more than storage size");
+          rd = nullptr;
+        }
+        else
+        {
+          rd = new Inode(fname, index, (lock ? 1 : 0), 0, 0, ns_, ns_->blocksize, GetQnum());
+          inodes_.push_back(rd);
+        }
+      }
+    }
     HeaderUnlock();
     return rd;
+  }
+  Status GetChildren(const std::string &dir,
+                     std::vector<std::string> *result)
+  {
+    result->clear();
+    for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
+    {
+      Inode *inode = *itr;
+      if (inode == nullptr)
+      {
+        break;
+      }
+      if (inode->IsDeleted())
+      {
+        continue;
+      }
+      const std::string &filename = inode->GetFname();
+
+      if (filename.size() >= dir.size() + 1 && filename[dir.size()] == '/' && (memcmp(filename.data(), dir.data(), dir.size()) == 0))
+      {
+        result->push_back(filename.substr(dir.size() + 1));
+      }
+    }
+    return Status::kOk;
   }
 
 private:
@@ -791,18 +868,18 @@ private:
       printf("failed to unvme_write");
       exit(1);
     }
-    unvme_free(ns_, ctx.buf);
+    unvme_free(ns_, ctx.dma);
   }
   Inode::AsyncIoContext HeaderWrite()
   {
     HeaderWriteSub();
-    void *buf = unvme_alloc(ns_, kHeaderBlockSize);
-    if (!buf)
+    vfio_dma_t *dma = unvme_alloc(ns_, kHeaderBlockSize);
+    if (!dma)
     {
       nvme_printf("allocation failure\n");
     }
-    memcpy(buf, header_buf_, kHeaderBlockSize);
-    unvme_iod_t iod = unvme_awrite(ns_, GetQnum(), buf, 0,
+    memcpy(dma->buf, header_buf_, kHeaderBlockSize);
+    unvme_iod_t iod = unvme_awrite(ns_, GetQnum(), dma->buf, 0,
                                    kHeaderBlockSize / ns_->blocksize);
     if (!iod)
     {
@@ -811,7 +888,8 @@ private:
     }
     Inode::AsyncIoContext ctx = {
         .iod = iod,
-        .buf = buf,
+        .dma = dma,
+        .time = ve_gettime(),
     };
     return ctx;
   }
@@ -825,19 +903,19 @@ private:
   }
   bool HeaderRead()
   {
-    void *buf = unvme_alloc(ns_, kHeaderBlockSize);
-    if (!buf)
+    vfio_dma_t *dma = unvme_alloc(ns_, kHeaderBlockSize);
+    if (!dma)
     {
       nvme_printf("allocation failure\n");
     }
-    if (unvme_read(ns_, GetQnum(), buf, 0, kHeaderBlockSize / ns_->blocksize))
+    if (unvme_read(ns_, GetQnum(), dma->buf, 0, kHeaderBlockSize / ns_->blocksize))
     {
       printf("failed to unvme_read");
       exit(1);
     }
-    memcpy(header_buf_, buf, kHeaderBlockSize);
+    memcpy(header_buf_, dma->buf, kHeaderBlockSize);
 
-    unvme_free(ns_, buf);
+    unvme_free(ns_, dma);
 
     int pos = 0;
     pos += strlen(kVersionString);
@@ -846,19 +924,11 @@ private:
       fprintf(stderr, "header version mismatch\n");
       return false;
     }
-    int hcnt = 0;
     while (header_buf_[pos] != '\0')
     {
       int len = 0;
-      header_data_[hcnt] = Inode::CreateFromBuffer(header_buf_ + pos, ns_, ns_->blocksize, len, GetQnum());
-      if (header_data_[hcnt]->GetIndex() != kHeaderBlockSize / ns_->blocksize + hcnt * file_isize_)
-      {
-        fprintf(stderr, "wrong format");
-        return false;
-      }
+      Inode *inode = Inode::CreateFromBuffer(header_buf_ + pos, ns_, ns_->blocksize, len, GetQnum());
       pos += len;
-      hcnt++;
-      assert(hcnt < 256);
     }
     return true;
   }
@@ -869,9 +939,9 @@ private:
     memset(header_buf_, 0, kHeaderBlockSize);
     memcpy(header_buf_, kVersionString, strlen(kVersionString));
     pos += strlen(kVersionString);
-    for (int i = 0; i < 256; i++)
+    for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
     {
-      Inode *inode = header_data_[i];
+      Inode *inode = *itr;
       if (inode != nullptr)
       {
         pos += inode->HeaderWrite(header_buf_ + pos, kHeaderBlockSize - pos);
@@ -891,16 +961,18 @@ private:
   {
     return Align(val + ns_->blocksize - 1);
   }
+  u32 GetBlockNumFromSize(size_t size)
+  {
+    return (size + ns_->blocksize - 1) / ns_->blocksize;
+  }
   const unvme_ns_t *ns_;
-  const u16 blocksize_;
-  const int file_isize_;
   std::atomic<uint> qcnt_;
-  Inode *header_data_[256];
+  std::list<Inode *> inodes_;
   std::atomic<uint> header_lock_;
   static std::unique_ptr<Vefs> vefs_;
   static thread_local int qnum_;
 
-  static const int kHeaderBlockSize = 512 * 10;
+  static const int kHeaderBlockSize = kFileSizeMax;
   static const char *kVersionString;
   char header_buf_[kHeaderBlockSize];
 };
