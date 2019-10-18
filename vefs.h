@@ -4,6 +4,8 @@
 #include <memory>
 #include <vector>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "misc.h"
 #include "inode.h"
@@ -116,6 +118,10 @@ public:
 
   void Delete(Inode *inode)
   {
+    if (kRedirect)
+    {
+      remove(inode->GetFname().c_str());
+    }
     // printf("Vefs::Delete %s\n", inode->fname.c_str());
     inode->Delete();
     header_.Delete(inode);
@@ -123,6 +129,10 @@ public:
 
   void Rename(Inode *inode, const std::string &fname)
   {
+    if (kRedirect)
+    {
+      rename(inode->GetFname().c_str(), fname.c_str());
+    }
     if (DoesExist(fname))
     {
       Delete(Create(fname, false));
@@ -147,6 +157,12 @@ public:
 
   Status Write(Inode *inode, size_t offset, const void *data, size_t size)
   {
+    if (kRedirect)
+    {
+      int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
+      pwrite(fd, data, size, offset);
+      close(fd);
+    }
     const char *data_ = (const char *)data;
     inode->RetrieveContexts();
     size_t oldsize = inode->GetLen();
@@ -184,10 +200,26 @@ public:
     {
       size = flen - offset;
     }
+    size_t total_size = size;
+    uint64_t original_offset = offset;
+    char *original_scratch = scratch;
     while (true)
     {
       if (size == 0)
       {
+        if (kRedirect)
+        {
+          void *buf = malloc(total_size);
+          int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
+          pread(fd, buf, total_size, original_offset);
+          if (memcmp(buf, original_scratch, total_size) != 0)
+          {
+            printf("check failed %s %lu %zu\n", inode->GetFname().c_str(), original_offset, total_size);
+            exit(1);
+          }
+          free(buf);
+          close(fd);
+        }
         return Status::kOk;
       }
       size_t boundary = inode->GetNextChunkBoundary(offset);
@@ -261,7 +293,6 @@ private:
 inline Vefs::Status
 Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
 {
-  debug_printf("\nr[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
   inode->RetrieveContexts();
   size_t noffset = Align(offset);
   size_t ndsize = AlignUp(n + offset - noffset);
@@ -288,6 +319,7 @@ Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
   memcpy(scratch, (u8 *)dma->buf + offset - noffset, n);
   unvme_free(ns_, dma);
 
+  debug_printf("\nr[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
   for (size_t i = 0; i < n; i++)
   {
     debug_printf("%02x", scratch[i]);

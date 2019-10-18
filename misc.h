@@ -24,4 +24,6 @@ static inline uint64_t ve_gettime()
 //#define debug_printf(...) printf(__VA_ARGS__)
 #define debug_printf(...)
 
+static const bool kRedirect = false;
+
 static const size_t kChunkSize = 2L * 1024 * 1024 /* * 1024*/;
