@@ -319,7 +319,7 @@ Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
   memcpy(scratch, (u8 *)dma->buf + offset - noffset, n);
   unvme_free(ns_, dma);
 
-  debug_printf("\nr[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
+  debug_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
   for (size_t i = 0; i < n; i++)
   {
     debug_printf("%02x", scratch[i]);
@@ -351,7 +351,19 @@ inline Vefs::Status Vefs::ReadChunkWithIoBuf(Inode *inode, uint64_t offset, size
   }
 
   nvme_printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-  unvme_read(ns_, GetQnum(), scratch, lba, nlb);
+  unvme_iod_t iod = unvme_aread(ns_, GetQnum(), scratch, lba, nlb);
+  if (!iod)
+  {
+    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
+    fprintf(stderr, "VEFS: read failed1\n");
+    return Status::kIoError;
+  }
+  if (unvme_apoll(iod, UNVME_TIMEOUT))
+  {
+    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
+    fprintf(stderr, "VEFS: read failed2\n");
+    return Status::kIoError;
+  }
 
   inode->ApplyCache(scratch, lba, nlb);
   return Status::kOk;
@@ -360,7 +372,7 @@ inline Vefs::Status Vefs::ReadChunkWithIoBuf(Inode *inode, uint64_t offset, size
 inline Vefs::Status Vefs::WriteChunk(Inode *inode, size_t offset, const void *data, size_t size, size_t oldsize)
 {
   nvme_printf("w> %ld %ld\n", offset, size);
-  debug_printf("\nw[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
+  debug_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
   for (size_t i = 0; i < size; i++)
   {
     debug_printf("%02x", ((char *)data)[i]);
