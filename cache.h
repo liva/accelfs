@@ -1,67 +1,88 @@
 #pragma once
 #include <utility>
+#include <assert.h>
 #include "misc.h"
+
+class ChunkIndex
+{
+public:
+    static ChunkIndex CreateFromPos(u64 pos)
+    {
+        return ChunkIndex(pos / kChunkSize);
+    }
+    static ChunkIndex CreateFromIndex(u64 index)
+    {
+        return ChunkIndex(index);
+    }
+    u64 Get()
+    {
+        return index_;
+    }
+    u64 GetPos()
+    {
+        return index_ * kChunkSize;
+    }
+    bool operator==(ChunkIndex i)
+    {
+        return index_ == i.index_;
+    }
+    bool operator!=(ChunkIndex i)
+    {
+        return index_ != i.index_;
+    }
+
+private:
+    ChunkIndex() = delete;
+    ChunkIndex(u64 index) : index_(index)
+    {
+    }
+    u64 index_;
+};
 
 class Cache
 {
 public:
-    const u64 index_;
-    vfio_dma_t *const dma_;
+    const ChunkIndex index_;
+    vfio_dma_t *dma_;
     bool needs_written_;
-    bool needs_sync_with_storage_;
-    const size_t blocksize_;
     Cache() = delete;
-    Cache(u64 index, vfio_dma_t *dma, size_t blocksize, bool needs_sync_with_storage) : index_(index), dma_(dma), blocksize_(blocksize), needs_sync_with_storage_(needs_sync_with_storage)
+    Cache(ChunkIndex index, vfio_dma_t *dma) : index_(index), dma_(dma)
     {
         needs_written_ = false;
     }
     bool IsWriteNeeded()
     {
-        if (needs_sync_with_storage_)
-        {
-            return needs_written_;
-        }
-        else
-        {
-            return false;
-        }
+        return needs_written_;
     }
-    u64 GetIndex()
+    ChunkIndex GetIndex()
     {
         return index_;
     }
-    std::pair<void *, u64> MarkSynced()
+    std::pair<vfio_dma_t *, ChunkIndex> MarkSynced(vfio_dma_t *ndma)
     {
-        assert(needs_sync_with_storage_);
         assert(needs_written_);
+        memcpy(ndma->buf, dma_->buf, kChunkSize);
         needs_written_ = false;
-        return std::make_pair(dma_->buf, index_);
+        std::pair<vfio_dma_t *, ChunkIndex> pair = std::make_pair(dma_, index_);
+        dma_ = ndma;
+        return pair;
     }
     // cache <- buf
-    void Refresh(char *buf)
+    void Refresh(const char *buf, size_t offset, size_t n)
     {
-        memcpy(dma_->buf, buf, blocksize_);
-        if (needs_sync_with_storage_)
-        {
-            needs_written_ = true;
-        }
+        assert(offset + n <= kChunkSize);
+        memcpy(reinterpret_cast<u8 *>(dma_->buf) + offset, buf, n);
+        needs_written_ = true;
     }
     // buf <- cache
-    bool Apply(void *buf, u64 index, u32 nb)
+    void Apply(char *buf, size_t offset, size_t n)
     {
-        if (index <= index_ && index_ < index + nb)
-        {
-            memcpy(reinterpret_cast<char *>(buf) + (index_ - index) * blocksize_, dma_->buf, blocksize_);
-            return true;
-        }
-        return false;
+        assert(offset + n <= kChunkSize);
+        memcpy(buf, reinterpret_cast<u8 *>(dma_->buf) + offset, n);
     }
     vfio_dma_t *Release()
     {
-        if (needs_sync_with_storage_)
-        {
-            assert(!needs_written_);
-        }
+        assert(!needs_written_);
         return dma_;
     }
 };

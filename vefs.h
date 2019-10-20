@@ -175,6 +175,7 @@ public:
         return Status::kIoError;
       }
     }
+    int cnt = 0;
     while (true)
     {
       if (size == 0)
@@ -191,6 +192,11 @@ public:
       size -= io_size;
       data_ += io_size;
       offset = boundary;
+      cnt++;
+      if (cnt > 1)
+      {
+        fprintf(stderr, "warning : performance optimization is needed\n");
+      }
     }
   }
   Status
@@ -201,9 +207,11 @@ public:
     {
       size = flen - offset;
     }
+    inode->RetrieveContexts();
     size_t total_size = size;
     uint64_t original_offset = offset;
     char *original_scratch = scratch;
+    int cnt = 0;
     while (true)
     {
       if (size == 0)
@@ -233,6 +241,11 @@ public:
       size -= io_size;
       scratch += io_size;
       offset = boundary;
+      cnt++;
+      if (cnt > 1)
+      {
+        fprintf(stderr, "warning : performance optimization is needed\n");
+      }
     }
   }
 
@@ -240,7 +253,7 @@ private:
   Status WriteChunk(Inode *inode, size_t offset, const void *data, size_t size, size_t oldsize);
   Status
   ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch);
-  Status PrereadUnalignedBlock(Inode *inode, vfio_dma_t *dma, size_t offset, size_t end, size_t oldsize);
+  //Status PrereadUnalignedBlock(Inode *inode, vfio_dma_t *dma, size_t offset, size_t end, size_t oldsize);
   int GetQnum()
   {
     if (qnum_ == -1)
@@ -303,47 +316,17 @@ private:
 inline Vefs::Status
 Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
 {
-  inode->RetrieveContexts();
   size_t noffset = AlignChunk(offset);
   size_t ndsize = AlignChunkUp(n + offset - noffset);
   assert(ndsize == kChunkSize);
+  ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
-  u64 lba = inode->GetLba(noffset);
-  u32 nlb = (u32)(ndsize / ns_->blocksize);
-  if (lba >= ns_->blockcount)
+  Cache *cache;
+  if (inode->GetCache(cindex, false, cache) != Inode::Status::kOk)
   {
-    nvme_printf("tried to access %d\n", lba);
     return Status::kIoError;
   }
-
-  nvme_printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-  vfio_dma_t *dma = unvme_alloc(ns_, ndsize);
-  if (!dma)
-  {
-    nvme_printf("allocation failure\n");
-    return Status::kTryAgain;
-  }
-
-  unvme_iod_t iod = unvme_aread(ns_, GetQnum(), dma->buf, lba, nlb);
-  if (!iod)
-  {
-    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-    fprintf(stderr, "VEFS: read failed1\n");
-    return Status::kIoError;
-  }
-
-  if (unvme_apoll(iod, UNVME_TIMEOUT))
-  {
-    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-    fprintf(stderr, "VEFS: read failed2\n");
-    return Status::kIoError;
-  }
-
-  inode->ApplyWriteCache(dma->buf, lba, nlb);
-
-  memcpy(scratch, (u8 *)dma->buf + offset - noffset, n);
-
-  inode->CreateReadCache(dma, noffset / kChunkSize);
+  cache->Apply(scratch, offset - noffset, n);
 
   debug_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
   for (size_t i = 0; i < n; i++)
@@ -365,117 +348,18 @@ inline Vefs::Status Vefs::WriteChunk(Inode *inode, size_t offset, const void *da
   }
   debug_printf("\n");
 
-  size_t end = offset + size;
-  size_t ndsize = AlignUp(end - Align(offset));
+  size_t noffset = AlignChunk(offset);
+  size_t ndsize = AlignChunkUp(size + offset - noffset);
+  assert(ndsize == kChunkSize);
+  ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
-  u64 lba = inode->GetLba(offset);
-  u32 nlb = (u32)(ndsize / ns_->blocksize);
-  if (lba >= ns_->blockcount)
+  Cache *cache;
+  bool createnew_ifmissing = (offset == noffset && size == kChunkSize) || (oldsize <= noffset);
+  if (inode->GetCache(cindex, createnew_ifmissing, cache) != Inode::Status::kOk)
   {
-    fprintf(stderr, "VEFS: tried to access beyond the block count\n");
     return Status::kIoError;
   }
+  cache->Refresh(reinterpret_cast<const char *>(data), offset - noffset, size);
 
-  nvme_printf("w^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, size);
-  vfio_dma_t *dma = unvme_alloc(ns_, ndsize);
-  if (!dma)
-  {
-    fprintf(stderr, "VEFS: buffer allocation error\n");
-    return Status::kTryAgain;
-  }
-
-  Status preread_status = PrereadUnalignedBlock(inode, dma, offset, end, oldsize);
-  if (preread_status != Status::kOk)
-  {
-    return preread_status;
-  }
-
-  memcpy((u8 *)dma->buf + offset - Align(offset), data, size);
-
-  if (inode->GetLba(inode->GetLen()) == lba + nlb - 1)
-  {
-    char *cbuf = reinterpret_cast<char *>(dma->buf) + ndsize - ns_->blocksize;
-    u64 cindex = lba + nlb - 1;
-    if (inode->CreateWriteCache(cbuf, cindex) != Inode::Status::kOk)
-    {
-      fprintf(stderr, "VEFS: cache create failed\n");
-      return Status::kIoError;
-    }
-    nlb--;
-  }
-
-  // WIP
-
-  if (nlb != 0)
-  {
-    unvme_iod_t iod = unvme_awrite(ns_, GetQnum(), dma->buf, lba, nlb);
-    if (!iod)
-    {
-      fprintf(stderr, "VEFS: awrite failed\n");
-      return Status::kIoError;
-    }
-    Inode::AsyncIoContext ctx = {
-        .iod = iod,
-        .dma = dma,
-        .time = ve_gettime(),
-    };
-    inode->RegisterWaitingContext(ctx);
-  }
-
-  return Status::kOk;
-}
-
-inline Vefs::Status Vefs::PrereadUnalignedBlock(Inode *inode, vfio_dma_t *dma, size_t offset, size_t end, size_t oldsize)
-{
-  if (oldsize == 0)
-  {
-    return Status::kOk;
-  }
-  std::vector<size_t> preload_offset;
-  size_t offset_list[2] = {offset, end};
-  for (size_t toffset : offset_list)
-  {
-    if ((toffset % ns_->blocksize) == 0)
-    {
-      // aligned
-      continue;
-    }
-    size_t aligned_toffset = Align(toffset);
-    if (Align(oldsize - 1) < aligned_toffset)
-    {
-      // data is not written in this block
-      continue;
-    }
-    preload_offset.push_back(toffset);
-  }
-  if (preload_offset.size() == 2 && inode->GetLba(preload_offset[0]) == inode->GetLba(preload_offset[1]))
-  {
-    preload_offset.pop_back();
-  }
-
-  std::vector<unvme_iod_t> preload_iod;
-  for (size_t toffset : preload_offset)
-  {
-    char *tbuf = reinterpret_cast<char *>(dma->buf) + Align(toffset) - Align(offset);
-    if (inode->ReuseWriteCache(tbuf, inode->GetLba(toffset)))
-    {
-      continue;
-    }
-    unvme_iod_t iod = unvme_aread(ns_, GetQnum(), tbuf, inode->GetLba(toffset), 1);
-    if (!iod)
-    {
-      fprintf(stderr, "VEFS: aread failed\n");
-      return Status::kIoError;
-    }
-    preload_iod.push_back(iod);
-  }
-  for (unvme_iod_t iod : preload_iod)
-  {
-    if (unvme_apoll(iod, UNVME_TIMEOUT))
-    {
-      fprintf(stderr, "VEFS: aread failed\n");
-      return Status::kIoError;
-    }
-  }
   return Status::kOk;
 }

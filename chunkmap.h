@@ -34,6 +34,14 @@ public:
         {
             return index_ == 0;
         }
+        bool operator==(Index i)
+        {
+            return index_ == i.index_;
+        }
+        bool operator!=(Index i)
+        {
+            return index_ != i.index_;
+        }
 
     private:
         Index() : index_(0) {}

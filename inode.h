@@ -63,18 +63,12 @@ public:
   }
   void Release()
   {
-    if (wcache_)
+    if (cache_)
     {
-      unvme_free(ns_, wcache_->Release());
+      unvme_free(ns_, cache_->Release());
     }
-    delete wcache_;
-    wcache_ = nullptr;
-    if (rcache_)
-    {
-      unvme_free(ns_, rcache_->Release());
-    }
-    delete rcache_;
-    rcache_ = nullptr;
+    delete cache_;
+    cache_ = nullptr;
   }
   ~Inode()
   {
@@ -188,72 +182,55 @@ public:
     inode_updated_ = false;
     return pos;
   }
-  Status CreateReadCache(vfio_dma_t *dma, u64 index)
+  Status GetCache(ChunkIndex cindex, bool createnew_ifmissing, Cache *&cache)
   {
-    // WIP
-    // assert(rcache_->GetIndex() != index);
-    if (!rcache_)
+    if (cache_ && cindex != cache_->GetIndex())
     {
-      rcache_ = new Cache(index, dma, kChunkSize, false);
-    }
-    else
-    {
-      unvme_free(ns_, dma);
-    }
-    return Status::kOk;
-  }
-  Status CreateWriteCache(char *buf, u64 index)
-  {
-    if (wcache_ && wcache_->GetIndex() != index)
-    {
-      if (wcache_->IsWriteNeeded())
+      // flush current cache
+      if (cache_->IsWriteNeeded())
       {
-        Inode::AsyncIoContext ctx;
-        if (WriteCacheSync(ctx) != Inode::Status::kOk)
+        AsyncIoContext ctx;
+        if (CacheSync(cache_, ctx) != Status::kOk)
         {
           fprintf(stderr, "VEFS: cache awrite failed\n");
           return Status::kIoError;
         }
-        assert(ctx.dma == nullptr);
-        ctx.dma = wcache_->Release();
         RegisterWaitingContext(ctx);
       }
       else
       {
-        unvme_free(ns_, wcache_->Release());
+        unvme_free(ns_, cache_->Release());
       }
-      delete wcache_;
-      wcache_ = nullptr;
+      delete cache_;
+      cache_ = nullptr;
     }
-    if (!wcache_)
+
+    if (!cache_)
     {
-      wcache_ = new Cache(index, unvme_alloc(ns_, blocksize_), blocksize_, true);
-    }
-    wcache_->Refresh(buf);
-    return Status::kOk;
-  }
-  void ApplyWriteCache(void *buf, u64 lba, u32 nlb)
-  {
-    if (wcache_)
-    {
-      wcache_->Apply(buf, lba, nlb);
-    }
-  }
-  bool ReuseWriteCache(char *buf, u64 lba)
-  {
-    if (wcache_)
-    {
-      if (wcache_->Apply(buf, lba, 1))
+      vfio_dma_t *dma = unvme_alloc(ns_, kChunkSize);
+      if (!dma)
       {
-        wcache_->MarkSynced();
-        return true;
+        nvme_printf("allocation failure\n");
+        return Status::kTryAgain;
       }
+      if (!createnew_ifmissing)
+      {
+        u64 lba = GetLba(cindex.GetPos());
+        u32 bnum = kChunkSize / ns_->blocksize;
+
+        unvme_iod_t iod = unvme_aread(ns_, qid_, dma->buf, lba, bnum);
+        if (!iod || unvme_apoll(iod, UNVME_TIMEOUT))
+        {
+          fprintf(stderr, "cr^ %ld %d\n", lba, bnum);
+          fprintf(stderr, "VEFS: read failed\n");
+          return Status::kIoError;
+        }
+      }
+
+      cache_ = new Cache(cindex, dma);
     }
-    return false;
-  }
-  Cache *GetWriteCache()
-  {
-    return wcache_;
+    cache = cache_;
+    return Status::kOk;
   }
   void RetrieveContexts()
   {
@@ -296,10 +273,10 @@ public:
   }
   bool Sync()
   {
-    if (wcache_ && wcache_->IsWriteNeeded())
+    if (cache_ && cache_->IsWriteNeeded())
     {
       AsyncIoContext ctx;
-      if (WriteCacheSync(ctx) != Status::kOk)
+      if (CacheSync(cache_, ctx) != Status::kOk)
       {
         printf("failed to sync cache");
         exit(1);
@@ -338,11 +315,10 @@ private:
     blocksize_ = blocksize;
     inode_updated_ = true;
   }
-
-  Status WriteCacheSync(Inode::AsyncIoContext &ctx)
+  Status CacheSync(Cache *cache, Inode::AsyncIoContext &ctx)
   {
-    std::pair<void *, u64> sinfo = wcache_->MarkSynced();
-    unvme_iod_t iod = unvme_awrite(ns_, qid_, sinfo.first, sinfo.second, 1);
+    std::pair<vfio_dma_t *, ChunkIndex> sinfo = cache->MarkSynced(unvme_alloc(ns_, kChunkSize));
+    unvme_iod_t iod = unvme_awrite(ns_, qid_, sinfo.first->buf, GetLba(sinfo.second.GetPos()), kChunkSize / ns_->blocksize);
     if (!iod)
     {
       fprintf(stderr, "VEFS: cache awrite failed\n");
@@ -350,12 +326,11 @@ private:
     }
     ctx = Inode::AsyncIoContext{
         .iod = iod,
-        .dma = nullptr,
+        .dma = sinfo.first,
         .time = ve_gettime(),
     };
     return Status::kOk;
   }
-
   std::string fname_;
   std::vector<u64> chunks_;
   int lock_;
@@ -369,8 +344,7 @@ private:
 
   bool inode_updated_;
 
-  Cache *wcache_ = nullptr;
-  Cache *rcache_ = nullptr;
+  Cache *cache_ = nullptr;
   static size_t AlignUp(size_t len)
   {
     return ((len + 3) / 4) * 4;
