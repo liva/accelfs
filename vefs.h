@@ -37,6 +37,7 @@ public:
   ~Vefs()
   {
     header_.WriteSync(GetQnum());
+    header_.Release();
   }
   static Vefs *Get()
   {
@@ -239,7 +240,6 @@ private:
   Status WriteChunk(Inode *inode, size_t offset, const void *data, size_t size, size_t oldsize);
   Status
   ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch);
-  Status ReadChunkWithIoBuf(Inode *inode, uint64_t offset, size_t n, char *scratch);
   Status PrereadUnalignedBlock(Inode *inode, vfio_dma_t *dma, size_t offset, size_t end, size_t oldsize);
   int GetQnum()
   {
@@ -258,16 +258,26 @@ private:
   template <class T>
   T Align(T val)
   {
-    return (val / ns_->blocksize) * ns_->blocksize;
+    return align(val, ns_->blocksize);
   }
   template <class T>
   T AlignUp(T val)
   {
-    return Align(val + ns_->blocksize - 1);
+    return alignup(val, ns_->blocksize);
   }
   u32 GetBlockNumFromSize(size_t size)
   {
-    return (size + ns_->blocksize - 1) / ns_->blocksize;
+    return getblocknum_from_size(size, ns_->blocksize);
+  }
+  template <class T>
+  T AlignChunk(T val)
+  {
+    return align(val, kChunkSize);
+  }
+  template <class T>
+  T AlignChunkUp(T val)
+  {
+    return alignup(val, kChunkSize);
   }
 
   class UnvmeWrapper
@@ -294,8 +304,9 @@ inline Vefs::Status
 Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
 {
   inode->RetrieveContexts();
-  size_t noffset = Align(offset);
-  size_t ndsize = AlignUp(n + offset - noffset);
+  size_t noffset = AlignChunk(offset);
+  size_t ndsize = AlignChunkUp(n + offset - noffset);
+  assert(ndsize == kChunkSize);
 
   u64 lba = inode->GetLba(noffset);
   u32 nlb = (u32)(ndsize / ns_->blocksize);
@@ -312,12 +323,27 @@ Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
     nvme_printf("allocation failure\n");
     return Status::kTryAgain;
   }
-  if (ReadChunkWithIoBuf(inode, noffset, ndsize, (char *)dma->buf) != Status::kOk)
+
+  unvme_iod_t iod = unvme_aread(ns_, GetQnum(), dma->buf, lba, nlb);
+  if (!iod)
   {
+    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
+    fprintf(stderr, "VEFS: read failed1\n");
     return Status::kIoError;
   }
+
+  if (unvme_apoll(iod, UNVME_TIMEOUT))
+  {
+    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
+    fprintf(stderr, "VEFS: read failed2\n");
+    return Status::kIoError;
+  }
+
+  inode->ApplyWriteCache(dma->buf, lba, nlb);
+
   memcpy(scratch, (u8 *)dma->buf + offset - noffset, n);
-  unvme_free(ns_, dma);
+
+  inode->CreateReadCache(dma, noffset / kChunkSize);
 
   debug_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
   for (size_t i = 0; i < n; i++)
@@ -326,46 +352,6 @@ Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
   }
   debug_printf("\n");
 
-  return Status::kOk;
-}
-
-inline Vefs::Status Vefs::ReadChunkWithIoBuf(Inode *inode, uint64_t offset, size_t n, char *scratch)
-{
-  size_t noffset = Align(offset);
-  if (noffset != offset)
-  {
-    return Status::kIoError;
-  }
-  size_t ndsize = AlignUp(n + offset - noffset);
-  if (ndsize != n)
-  {
-    return Status::kIoError;
-  }
-
-  u64 lba = inode->GetLba(noffset);
-  u32 nlb = (u32)(ndsize / ns_->blocksize);
-  if (lba >= ns_->blockcount)
-  {
-    nvme_printf("tried to access %d\n", lba);
-    return Status::kIoError;
-  }
-
-  nvme_printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-  unvme_iod_t iod = unvme_aread(ns_, GetQnum(), scratch, lba, nlb);
-  if (!iod)
-  {
-    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-    fprintf(stderr, "VEFS: read failed1\n");
-    return Status::kIoError;
-  }
-  if (unvme_apoll(iod, UNVME_TIMEOUT))
-  {
-    printf("r^ %d (=%ld/bs) %d (=%ld/bs)\n", lba, offset, nlb, ndsize);
-    fprintf(stderr, "VEFS: read failed2\n");
-    return Status::kIoError;
-  }
-
-  inode->ApplyCache(scratch, lba, nlb);
   return Status::kOk;
 }
 
@@ -408,13 +394,17 @@ inline Vefs::Status Vefs::WriteChunk(Inode *inode, size_t offset, const void *da
 
   if (inode->GetLba(inode->GetLen()) == lba + nlb - 1)
   {
-    if (inode->RefreshCache(reinterpret_cast<char *>(dma->buf) + ndsize - ns_->blocksize, lba + nlb - 1) != Inode::Status::kOk)
+    char *cbuf = reinterpret_cast<char *>(dma->buf) + ndsize - ns_->blocksize;
+    u64 cindex = lba + nlb - 1;
+    if (inode->CreateWriteCache(cbuf, cindex) != Inode::Status::kOk)
     {
-      fprintf(stderr, "VEFS: cache awrite failed\n");
+      fprintf(stderr, "VEFS: cache create failed\n");
       return Status::kIoError;
     }
     nlb--;
   }
+
+  // WIP
 
   if (nlb != 0)
   {
@@ -467,7 +457,7 @@ inline Vefs::Status Vefs::PrereadUnalignedBlock(Inode *inode, vfio_dma_t *dma, s
   for (size_t toffset : preload_offset)
   {
     char *tbuf = reinterpret_cast<char *>(dma->buf) + Align(toffset) - Align(offset);
-    if (inode->ReuseCache(tbuf, inode->GetLba(toffset)))
+    if (inode->ReuseWriteCache(tbuf, inode->GetLba(toffset)))
     {
       continue;
     }

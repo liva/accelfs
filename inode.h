@@ -3,8 +3,10 @@
 #include <deque>
 #include <string>
 #include <vector>
+#include <utility>
 #include "misc.h"
 #include "chunkmap.h"
+#include "cache.h"
 
 class Inode
 {
@@ -58,6 +60,21 @@ public:
     Inode *inode = new Inode(fname, chunks, lock, len, chunkmap, ns, blocksize, qid);
     inode->inode_updated_ = false;
     return inode;
+  }
+  void Release()
+  {
+    if (wcache_)
+    {
+      unvme_free(ns_, wcache_->Release());
+    }
+    delete wcache_;
+    wcache_ = nullptr;
+    if (rcache_)
+    {
+      unvme_free(ns_, rcache_->Release());
+    }
+    delete rcache_;
+    rcache_ = nullptr;
   }
   ~Inode()
   {
@@ -121,16 +138,16 @@ public:
   {
     assert(CheckOffset(offset));
     int ci = offset / kChunkSize;
-    u64 cc_lba = chunks_[ci] + kChunkSize / ns_->blocksize;
+    //u64 cc_lba = chunks_[ci] + kChunkSize / ns_->blocksize;
     ci++;
-    for (; ci < chunks_.size(); ci++)
+    /*for (; ci < chunks_.size(); ci++)
     {
       if (cc_lba != chunks_[ci])
       {
         break;
       }
       cc_lba += kChunkSize / ns_->blocksize;
-    }
+    }*/
     return ci * kChunkSize;
   }
   void Rename(const std::string &fname)
@@ -171,71 +188,72 @@ public:
     inode_updated_ = false;
     return pos;
   }
-  Status RefreshCache(char *buf, u64 index)
+  Status CreateReadCache(vfio_dma_t *dma, u64 index)
   {
-    if (!cache_.dma_)
+    // WIP
+    // assert(rcache_->GetIndex() != index);
+    if (!rcache_)
     {
-      cache_.dma_ = unvme_alloc(ns_, ns_->blocksize);
+      rcache_ = new Cache(index, dma, kChunkSize, false);
     }
-    else if (cache_.index_ != index)
+    else
     {
-      if (CacheWrite(true) != Status::kOk)
+      unvme_free(ns_, dma);
+    }
+    return Status::kOk;
+  }
+  Status CreateWriteCache(char *buf, u64 index)
+  {
+    if (wcache_ && wcache_->GetIndex() != index)
+    {
+      if (wcache_->IsWriteNeeded())
       {
-        return Status::kIoError;
+        Inode::AsyncIoContext ctx;
+        if (WriteCacheSync(ctx) != Inode::Status::kOk)
+        {
+          fprintf(stderr, "VEFS: cache awrite failed\n");
+          return Status::kIoError;
+        }
+        assert(ctx.dma == nullptr);
+        ctx.dma = wcache_->Release();
+        RegisterWaitingContext(ctx);
       }
+      else
+      {
+        unvme_free(ns_, wcache_->Release());
+      }
+      delete wcache_;
+      wcache_ = nullptr;
     }
-    cache_.index_ = index;
-    memcpy(cache_.dma_->buf, buf, ns_->blocksize);
-    cache_.needs_written_ = true;
+    if (!wcache_)
+    {
+      wcache_ = new Cache(index, unvme_alloc(ns_, blocksize_), blocksize_, true);
+    }
+    wcache_->Refresh(buf);
     return Status::kOk;
   }
-  Status CacheWrite(bool no_memcpy)
+  void ApplyWriteCache(void *buf, u64 lba, u32 nlb)
   {
-    if (!cache_.dma_ || !cache_.needs_written_)
+    if (wcache_)
     {
-      return Status::kOk;
+      wcache_->Apply(buf, lba, nlb);
     }
-    unvme_iod_t iod = unvme_awrite(ns_, qid_, cache_.dma_->buf, cache_.index_, 1);
-    if (!iod)
-    {
-      fprintf(stderr, "VEFS: cache awrite failed\n");
-      return Status::kIoError;
-    }
-    cache_.needs_written_ = false;
-    Inode::AsyncIoContext ctx = {
-        .iod = iod,
-        .dma = cache_.dma_,
-        .time = ve_gettime(),
-    };
-    vfio_dma_t *ndma = unvme_alloc(ns_, ns_->blocksize);
-    if (!no_memcpy)
-    {
-      memcpy(ndma->buf, cache_.dma_->buf, ns_->blocksize);
-    }
-    cache_.dma_ = ndma;
-    RegisterWaitingContext(ctx);
-    return Status::kOk;
   }
-  bool ReuseCache(char *buf, u64 lba)
+  bool ReuseWriteCache(char *buf, u64 lba)
   {
-    if (cache_.dma_ && cache_.index_ == lba)
+    if (wcache_)
     {
-      memcpy(buf, cache_.dma_->buf, blocksize_);
-      cache_.needs_written_ = false;
-      return true;
+      if (wcache_->Apply(buf, lba, 1))
+      {
+        wcache_->MarkSynced();
+        return true;
+      }
     }
     return false;
   }
-  void ApplyCache(void *buf, u64 lba, u32 nlb)
+  Cache *GetWriteCache()
   {
-    if (!cache_.dma_)
-    {
-      return;
-    }
-    if (lba <= cache_.index_ && cache_.index_ < lba + nlb)
-    {
-      memcpy(reinterpret_cast<char *>(buf) + (cache_.index_ - lba) * blocksize_, cache_.dma_->buf, blocksize_);
-    }
+    return wcache_;
   }
   void RetrieveContexts()
   {
@@ -252,7 +270,10 @@ public:
         printf("failed to unvme_write");
         exit(1);
       }
-      unvme_free(ns_, (*itr).dma);
+      if ((*itr).dma)
+      {
+        unvme_free(ns_, (*itr).dma);
+      }
       io_waiting_queue_.pop_front();
     }
   }
@@ -266,16 +287,24 @@ public:
         printf("failed to unvme_write");
         exit(1);
       }
-      unvme_free(ns_, (*itr).dma);
+      if ((*itr).dma)
+      {
+        unvme_free(ns_, (*itr).dma);
+      }
       io_waiting_queue_.pop_front();
     }
   }
   bool Sync()
   {
-    if (CacheWrite(false) != Status::kOk)
+    if (wcache_ && wcache_->IsWriteNeeded())
     {
-      printf("failed to CacheWrite");
-      exit(1);
+      AsyncIoContext ctx;
+      if (WriteCacheSync(ctx) != Status::kOk)
+      {
+        printf("failed to sync cache");
+        exit(1);
+      }
+      RegisterWaitingContext(ctx);
     }
     WaitIoCompletion();
     return inode_updated_;
@@ -297,29 +326,10 @@ public:
   {
     return fname_;
   }
-  /*  Status Write(const void *data, size_t offset, size_t len)
-  {
-    if (!append_cache_->Appendable(offset))
-    {
-      // TODO: support random write
-      return Status::kIoError;
-    }
-    while (true)
-    {
-      size_t wsize = append_cache_->Write(data, offset, wsize);
-      offset += wsize;
-      len -= wsize;
-      if (len == 0)
-      {
-        return Status::kOk;
-      }
-      // WIP: Flush();
-    }
-  }*/
 
 private:
   // TODO: qid would not work on multi thread
-  Inode(std::string fname, std::vector<u64> &chunks, int lock, size_t len, Chunkmap &chunkmap, const unvme_ns_t *ns, size_t blocksize, int qid) : chunkmap_(chunkmap), ns_(ns) /*, append_cache_(ns)*/, qid_(qid), cache_(ns_)
+  Inode(std::string fname, std::vector<u64> &chunks, int lock, size_t len, Chunkmap &chunkmap, const unvme_ns_t *ns, size_t blocksize, int qid) : chunkmap_(chunkmap), ns_(ns) /*, append_cache_(ns)*/, qid_(qid)
   {
     fname_ = fname;
     chunks_ = chunks;
@@ -327,6 +337,23 @@ private:
     len_ = len;
     blocksize_ = blocksize;
     inode_updated_ = true;
+  }
+
+  Status WriteCacheSync(Inode::AsyncIoContext &ctx)
+  {
+    std::pair<void *, u64> sinfo = wcache_->MarkSynced();
+    unvme_iod_t iod = unvme_awrite(ns_, qid_, sinfo.first, sinfo.second, 1);
+    if (!iod)
+    {
+      fprintf(stderr, "VEFS: cache awrite failed\n");
+      return Status::kIoError;
+    }
+    ctx = Inode::AsyncIoContext{
+        .iod = iod,
+        .dma = nullptr,
+        .time = ve_gettime(),
+    };
+    return Status::kOk;
   }
 
   std::string fname_;
@@ -342,73 +369,10 @@ private:
 
   bool inode_updated_;
 
-  struct Cache
-  {
-    u64 index_;
-    vfio_dma_t *dma_;
-    bool needs_written_;
-    const unvme_ns_t *ns_;
-    Cache() = delete;
-    Cache(const unvme_ns_t *ns) : ns_(ns)
-    {
-      dma_ = nullptr;
-      needs_written_ = false;
-    }
-    ~Cache()
-    {
-      assert(!needs_written_);
-      if (dma_)
-      {
-        unvme_free(ns_, dma_);
-      }
-    }
-  };
-
-  Cache cache_;
+  Cache *wcache_ = nullptr;
+  Cache *rcache_ = nullptr;
   static size_t AlignUp(size_t len)
   {
     return ((len + 3) / 4) * 4;
   }
-
-  /*  struct AppendCache
-  {
-    void *data_[8];
-    size_t offset_;
-    size_t size_;
-    size_t kCacheSize = 4096;
-    AppendCache(const unvme_ns_t *ns) : ns_(ns)
-    {
-      // WIP: read it before
-      for (int i = 0; i < 8; i++)
-      {
-        data_[i] = unvme_alloc(ns_, kCacheSize);
-      }
-      size_ = 0;
-      offset_ = 0;
-    }
-    ~AppendCache()
-    {
-      for (int i = 0; i < 8; i++)
-      {
-        unvme_free(ns_, data_[i]);
-      }
-    }
-    bool Appendable(size_t offset)
-    {
-      return (size_ == 0) || ((offset_ <= offset) && (offset <= offset_ + size_));
-    }
-    size_t Write(const void *data, size_t offset, size_t len)
-    {
-      assert(Appendable(offset));
-
-      assert(len == GetWritableSizeWithoutFlush(offset, len));
-      memcpy(data_ + (offset - offset_), data, len);
-    }
-    const unvme_ns_t *ns_;
-  };
-  AppendCache append_cache_;*/
-  struct Block
-  {
-    void *buf;
-  };
 };

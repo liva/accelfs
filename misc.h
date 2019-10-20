@@ -18,6 +18,22 @@ static inline uint64_t ve_gettime()
     return ((uint64_t)1000 * ret) / 800;
 }
 
+template <class T, class U>
+inline T align(T val, U blocksize)
+{
+    return (val / blocksize) * blocksize;
+}
+template <class T, class U>
+inline T alignup(T val, U blocksize)
+{
+    return align(val + blocksize - 1, blocksize);
+}
+template <class T, class U>
+inline T getblocknum_from_size(T size, U blocksize)
+{
+    return (size + blocksize - 1) / blocksize;
+}
+
 //#define nvme_printf(...) printf(__VA_ARGS__)
 #define nvme_printf(...)
 

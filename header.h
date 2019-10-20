@@ -11,7 +11,7 @@ class Header
 public:
     Header(const unvme_ns_t *ns, int qnum);
     Header() = delete;
-    ~Header()
+    void Release()
     {
         assert(!updated_);
         Lock();
@@ -21,10 +21,16 @@ public:
             Inode *inode = *itr;
             bool inode_updated = inode->Sync();
             assert(!inode_updated);
+            inode->Release();
             delete inode;
         }
+        inodes_.clear();
         Unlock();
         //HardWrite();
+    }
+    ~Header()
+    {
+        assert(inodes_.empty());
     }
     Inode *GetInode(const std::string &fname)
     {
@@ -103,6 +109,7 @@ public:
         inodes_.remove(inode);
         Unlock();
         inode->Sync();
+        inode->Release();
         delete inode;
     }
 
