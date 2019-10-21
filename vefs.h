@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <deque>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -158,6 +159,7 @@ public:
 
   Status Write(Inode *inode, size_t offset, const void *data, size_t size)
   {
+    debug_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
     if (kRedirect)
     {
       int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
@@ -175,27 +177,74 @@ public:
         return Status::kIoError;
       }
     }
-    int cnt = 0;
-    while (true)
+
+    std::deque<unvme_iod_t> iod_queue;
     {
-      if (size == 0)
+      size_t coffset = offset;
+      const char *cdata = data_;
+      size_t csize = size;
+      while (true)
       {
-        return Status::kOk;
+        if (csize == 0)
+        {
+          break;
+        }
+        size_t boundary = inode->GetNextChunkBoundary(coffset);
+        size_t io_size = (coffset + csize > boundary) ? boundary - coffset : csize;
+
+        size_t noffset = AlignChunk(coffset);
+        size_t ndsize = AlignChunkUp(io_size);
+        assert(ndsize == kChunkSize);
+        ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
+
+        bool createnew_ifmissing = (coffset == noffset && io_size == kChunkSize) || (oldsize <= noffset);
+        if (inode->PrepareCache(cindex, createnew_ifmissing, iod_queue) != Inode::Status::kOk)
+        {
+          return Status::kIoError;
+        }
+
+        coffset += io_size;
+        cdata += io_size;
+        csize -= io_size;
       }
-      size_t boundary = inode->GetNextChunkBoundary(offset);
-      size_t io_size = (offset + size > boundary) ? boundary - offset : size;
-      Status io_status = WriteChunk(inode, offset, data_, io_size, oldsize);
-      if (io_status != Status::kOk)
+    }
+
+    for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
+    {
+      unvme_iod_t iod = *it;
+      if (unvme_apoll(iod, UNVME_TIMEOUT))
       {
-        return io_status;
+        fprintf(stderr, "VEFS: apoll failed\n");
+        return Status::kIoError;
       }
-      size -= io_size;
-      data_ += io_size;
-      offset = boundary;
-      cnt++;
-      if (cnt > 1)
+    }
+
+    {
+      size_t coffset = offset;
+      const char *cdata = data_;
+      size_t csize = size;
+      while (true)
       {
-        fprintf(stderr, "warning : performance optimization is needed\n");
+        if (csize == 0)
+        {
+          inode->ShrinkCacheListIfNeeded();
+          return Status::kOk;
+        }
+        size_t boundary = inode->GetNextChunkBoundary(coffset);
+        size_t io_size = (coffset + csize > boundary) ? boundary - coffset : csize;
+
+        size_t noffset = AlignChunk(coffset);
+        size_t ndsize = AlignChunkUp(io_size);
+        assert(ndsize == kChunkSize);
+        ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
+
+        Cache *cache = inode->FindFromCacheList(cindex);
+        assert(cache != nullptr);
+        cache->Refresh(cdata, coffset - noffset, io_size);
+
+        coffset += io_size;
+        cdata += io_size;
+        csize -= io_size;
       }
     }
   }
@@ -208,52 +257,102 @@ public:
       size = flen - offset;
     }
     inode->RetrieveContexts();
-    size_t total_size = size;
-    uint64_t original_offset = offset;
-    char *original_scratch = scratch;
-    int cnt = 0;
-    while (true)
+
+    std::deque<unvme_iod_t> iod_queue;
     {
-      if (size == 0)
+      size_t coffset = offset;
+      char *cdata = scratch;
+      size_t csize = size;
+      while (true)
       {
-        if (kRedirect)
+        if (csize == 0)
         {
-          void *buf = malloc(total_size);
-          int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
-          pread(fd, buf, total_size, original_offset);
-          if (memcmp(buf, original_scratch, total_size) != 0)
+          uint64_t nc_offset = AlignChunkUp(coffset);
+          if (nc_offset < flen)
           {
-            printf("check failed %s %lu %zu\n", inode->GetFname().c_str(), original_offset, total_size);
-            exit(1);
+            // prefetch
+            ChunkIndex cindex = ChunkIndex::CreateFromPos(nc_offset);
+            if (inode->PrepareCache(cindex, false, iod_queue) != Inode::Status::kOk)
+            {
+              return Status::kIoError;
+            }
           }
-          free(buf);
-          close(fd);
+          break;
         }
-        return Status::kOk;
+        size_t boundary = inode->GetNextChunkBoundary(coffset);
+        size_t io_size = (coffset + csize > boundary) ? boundary - coffset : csize;
+
+        size_t noffset = AlignChunk(coffset);
+        size_t ndsize = AlignChunkUp(io_size);
+        assert(ndsize == kChunkSize);
+        ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
+
+        if (inode->PrepareCache(cindex, false, iod_queue) != Inode::Status::kOk)
+        {
+          return Status::kIoError;
+        }
+
+        coffset += io_size;
+        cdata += io_size;
+        csize -= io_size;
       }
-      size_t boundary = inode->GetNextChunkBoundary(offset);
-      size_t io_size = (offset + size > boundary) ? boundary - offset : size;
-      Status io_status = ReadChunk(inode, offset, io_size, scratch);
-      if (io_status != Status::kOk)
+    }
+
+    for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
+    {
+      unvme_iod_t iod = *it;
+      if (unvme_apoll(iod, UNVME_TIMEOUT))
       {
-        return io_status;
+        fprintf(stderr, "VEFS: apoll failed\n");
+        return Status::kIoError;
       }
-      size -= io_size;
-      scratch += io_size;
-      offset = boundary;
-      cnt++;
-      if (cnt > 1)
+    }
+
+    {
+      size_t coffset = offset;
+      char *cdata = scratch;
+      size_t csize = size;
+      while (true)
       {
-        fprintf(stderr, "warning : performance optimization is needed\n");
+        if (csize == 0)
+        {
+          inode->ShrinkCacheListIfNeeded();
+          debug_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
+          if (kRedirect)
+          {
+            void *buf = malloc(size);
+            int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
+            pread(fd, buf, size, offset);
+            if (memcmp(buf, scratch, size) != 0)
+            {
+              printf("check failed %s %lu %zu\n", inode->GetFname().c_str(), offset, size);
+              exit(1);
+            }
+            free(buf);
+            close(fd);
+          }
+          return Status::kOk;
+        }
+        size_t boundary = inode->GetNextChunkBoundary(coffset);
+        size_t io_size = (coffset + csize > boundary) ? boundary - coffset : csize;
+
+        size_t noffset = AlignChunk(coffset);
+        size_t ndsize = AlignChunkUp(io_size);
+        assert(ndsize == kChunkSize);
+        ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
+
+        Cache *cache = inode->FindFromCacheList(cindex);
+        assert(cache != nullptr);
+        cache->Apply(cdata, coffset - noffset, io_size);
+
+        coffset += io_size;
+        cdata += io_size;
+        csize -= io_size;
       }
     }
   }
 
 private:
-  Status WriteChunk(Inode *inode, size_t offset, const void *data, size_t size, size_t oldsize);
-  Status
-  ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch);
-  //Status PrereadUnalignedBlock(Inode *inode, vfio_dma_t *dma, size_t offset, size_t end, size_t oldsize);
   int GetQnum()
   {
     if (qnum_ == -1)
@@ -312,54 +411,3 @@ private:
   static std::unique_ptr<Vefs> vefs_;
   static thread_local int qnum_;
 };
-
-inline Vefs::Status
-Vefs::ReadChunk(Inode *inode, uint64_t offset, size_t n, char *scratch)
-{
-  size_t noffset = AlignChunk(offset);
-  size_t ndsize = AlignChunkUp(n + offset - noffset);
-  assert(ndsize == kChunkSize);
-  ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
-
-  Cache *cache;
-  if (inode->GetCache(cindex, false, cache) != Inode::Status::kOk)
-  {
-    return Status::kIoError;
-  }
-  cache->Apply(scratch, offset - noffset, n);
-
-  debug_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, n);
-  for (size_t i = 0; i < n; i++)
-  {
-    debug_printf("%02x", scratch[i]);
-  }
-  debug_printf("\n");
-
-  return Status::kOk;
-}
-
-inline Vefs::Status Vefs::WriteChunk(Inode *inode, size_t offset, const void *data, size_t size, size_t oldsize)
-{
-  nvme_printf("w> %ld %ld\n", offset, size);
-  debug_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
-  for (size_t i = 0; i < size; i++)
-  {
-    debug_printf("%02x", ((char *)data)[i]);
-  }
-  debug_printf("\n");
-
-  size_t noffset = AlignChunk(offset);
-  size_t ndsize = AlignChunkUp(size + offset - noffset);
-  assert(ndsize == kChunkSize);
-  ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
-
-  Cache *cache;
-  bool createnew_ifmissing = (offset == noffset && size == kChunkSize) || (oldsize <= noffset);
-  if (inode->GetCache(cindex, createnew_ifmissing, cache) != Inode::Status::kOk)
-  {
-    return Status::kIoError;
-  }
-  cache->Refresh(reinterpret_cast<const char *>(data), offset - noffset, size);
-
-  return Status::kOk;
-}

@@ -2,8 +2,10 @@
 
 #include <deque>
 #include <string>
+#include <list>
 #include <vector>
 #include <utility>
+#include <deque>
 #include "misc.h"
 #include "chunkmap.h"
 #include "cache.h"
@@ -63,12 +65,13 @@ public:
   }
   void Release()
   {
-    if (cache_)
+    for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
     {
-      unvme_free(ns_, cache_->Release());
+      Cache *cache = *it;
+      unvme_free(ns_, cache->Release());
+      delete cache;
     }
-    delete cache_;
-    cache_ = nullptr;
+    cache_list_.clear();
   }
   ~Inode()
   {
@@ -132,16 +135,7 @@ public:
   {
     assert(CheckOffset(offset));
     int ci = offset / kChunkSize;
-    //u64 cc_lba = chunks_[ci] + kChunkSize / ns_->blocksize;
     ci++;
-    /*for (; ci < chunks_.size(); ci++)
-    {
-      if (cc_lba != chunks_[ci])
-      {
-        break;
-      }
-      cc_lba += kChunkSize / ns_->blocksize;
-    }*/
     return ci * kChunkSize;
   }
   void Rename(const std::string &fname)
@@ -182,15 +176,105 @@ public:
     inode_updated_ = false;
     return pos;
   }
+  Cache *FindFromCacheList(ChunkIndex cindex)
+  {
+    for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
+    {
+      Cache *c = *it;
+      if (c->GetIndex() == cindex)
+      {
+        cache_list_.erase(it);
+        cache_list_.push_back(c);
+        return c;
+      }
+    }
+    return nullptr;
+  }
+  Status PrepareCache(ChunkIndex cindex, bool createnew_ifmissing, std::deque<unvme_iod_t> &queue)
+  {
+    Cache *c = FindFromCacheList(cindex);
+    if (c)
+    {
+      return Status::kOk;
+    }
+    // could not find
+    // create one
+    vfio_dma_t *dma = unvme_alloc(ns_, kChunkSize);
+    if (!dma)
+    {
+      nvme_printf("allocation failure\n");
+      return Status::kTryAgain;
+    }
+    if (!createnew_ifmissing)
+    {
+      u64 lba = GetLba(cindex.GetPos());
+      u32 bnum = kChunkSize / ns_->blocksize;
+
+      unvme_iod_t iod = unvme_aread(ns_, qid_, dma->buf, lba, bnum);
+      if (!iod)
+      {
+        fprintf(stderr, "cr^ %ld %d\n", lba, bnum);
+        fprintf(stderr, "VEFS: read failed\n");
+        return Status::kIoError;
+      }
+      queue.push_back(iod);
+    }
+
+    c = new Cache(cindex, dma);
+    cache_list_.push_back(c);
+
+    return Status::kOk;
+  }
   Status GetCache(ChunkIndex cindex, bool createnew_ifmissing, Cache *&cache)
   {
-    if (cache_ && cindex != cache_->GetIndex())
+    Cache *c = FindFromCacheList(cindex);
+    if (c)
     {
+      cache = c;
+      return Status::kOk;
+    }
+    // could not find
+    // create one
+    vfio_dma_t *dma = unvme_alloc(ns_, kChunkSize);
+    if (!dma)
+    {
+      nvme_printf("allocation failure\n");
+      return Status::kTryAgain;
+    }
+    if (!createnew_ifmissing)
+    {
+      u64 lba = GetLba(cindex.GetPos());
+      u32 bnum = kChunkSize / ns_->blocksize;
+
+      unvme_iod_t iod = unvme_aread(ns_, qid_, dma->buf, lba, bnum);
+      if (!iod || unvme_apoll(iod, UNVME_TIMEOUT))
+      {
+        fprintf(stderr, "cr^ %ld %d\n", lba, bnum);
+        fprintf(stderr, "VEFS: read failed\n");
+        return Status::kIoError;
+      }
+    }
+
+    c = new Cache(cindex, dma);
+    cache_list_.push_back(c);
+    cache = c;
+
+    return Status::kOk;
+  }
+  Status ShrinkCacheListIfNeeded()
+  {
+    while (cache_list_.size() > 4)
+    {
+      // needs to remove one of elements
+      auto it = cache_list_.begin();
+      Cache *c = *it;
+      cache_list_.erase(it);
+
       // flush current cache
-      if (cache_->IsWriteNeeded())
+      if (c->IsWriteNeeded())
       {
         AsyncIoContext ctx;
-        if (CacheSync(cache_, ctx) != Status::kOk)
+        if (CacheSync(c, ctx) != Status::kOk)
         {
           fprintf(stderr, "VEFS: cache awrite failed\n");
           return Status::kIoError;
@@ -199,37 +283,10 @@ public:
       }
       else
       {
-        unvme_free(ns_, cache_->Release());
+        unvme_free(ns_, c->Release());
       }
-      delete cache_;
-      cache_ = nullptr;
+      delete c;
     }
-
-    if (!cache_)
-    {
-      vfio_dma_t *dma = unvme_alloc(ns_, kChunkSize);
-      if (!dma)
-      {
-        nvme_printf("allocation failure\n");
-        return Status::kTryAgain;
-      }
-      if (!createnew_ifmissing)
-      {
-        u64 lba = GetLba(cindex.GetPos());
-        u32 bnum = kChunkSize / ns_->blocksize;
-
-        unvme_iod_t iod = unvme_aread(ns_, qid_, dma->buf, lba, bnum);
-        if (!iod || unvme_apoll(iod, UNVME_TIMEOUT))
-        {
-          fprintf(stderr, "cr^ %ld %d\n", lba, bnum);
-          fprintf(stderr, "VEFS: read failed\n");
-          return Status::kIoError;
-        }
-      }
-
-      cache_ = new Cache(cindex, dma);
-    }
-    cache = cache_;
     return Status::kOk;
   }
   void RetrieveContexts()
@@ -273,15 +330,19 @@ public:
   }
   bool Sync()
   {
-    if (cache_ && cache_->IsWriteNeeded())
+    for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
     {
-      AsyncIoContext ctx;
-      if (CacheSync(cache_, ctx) != Status::kOk)
+      Cache *c = *it;
+      if (c->IsWriteNeeded())
       {
-        printf("failed to sync cache");
-        exit(1);
+        AsyncIoContext ctx;
+        if (CacheSync(c, ctx) != Status::kOk)
+        {
+          printf("failed to sync cache");
+          exit(1);
+        }
+        RegisterWaitingContext(ctx);
       }
-      RegisterWaitingContext(ctx);
     }
     WaitIoCompletion();
     return inode_updated_;
@@ -344,7 +405,7 @@ private:
 
   bool inode_updated_;
 
-  Cache *cache_ = nullptr;
+  std::list<Cache *> cache_list_;
   static size_t AlignUp(size_t len)
   {
     return ((len + 3) / 4) * 4;
