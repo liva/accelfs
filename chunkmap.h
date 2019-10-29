@@ -1,34 +1,39 @@
 #pragma once
-#include "misc.h"
+#include <atomic>
+#include <assert.h>
+#include <string.h>
+#include <stdio.h>
+#include "_misc.h"
+#include "spinlock.h"
 
 class Chunkmap
 {
 public:
-    static const u64 kSize = kChunkSize;
+    static const uint64_t kSize = kChunkSize * 4096;
     class Index
     {
     public:
-        static Index CreateFromPos(u64 pos)
+        Index(const Index &i) : index_(i.index_) {}
+        Index() : index_(0) {}
+        static Index CreateFromPos(uint64_t pos)
         {
-            return Index(pos / kSize);
+            assert(pos / kChunkSize != 0);
+            return Index(pos / kChunkSize);
         }
-        static Index CreateFromIndex(u64 index)
+        static Index CreateFromIndex(uint64_t index)
         {
+            assert(index != 0);
             return Index(index);
         }
-        static Index CreateNull()
-        {
-            return Index();
-        }
-        u64 Get()
+        uint64_t Get()
         {
             assert(index_ != 0);
             return index_;
         }
-        u64 GetPos()
+        uint64_t GetPos()
         {
             assert(index_ != 0);
-            return index_ * kSize;
+            return index_ * kChunkSize;
         }
         bool IsNull()
         {
@@ -44,47 +49,76 @@ public:
         }
 
     private:
-        Index() : index_(0) {}
-        Index(u64 index) : index_(index)
+        Index(uint64_t index) : index_(index)
         {
             assert(index_ != 0);
         }
-        u64 index_;
+        uint64_t index_;
     };
+    Chunkmap() : lock_(0)
+    {
+        buf_ = (uint8_t *)malloc(kSize);
+        for (int i = 0; i < kSize / kChunkSize; i++)
+        {
+            needs_written_[i] = false;
+        }
+    }
+    ~Chunkmap()
+    {
+        free(buf_);
+        for (int i = 0; i < kSize / kChunkSize; i++)
+        {
+            assert(!needs_written_[i]);
+        }
+    }
     void Create(Index max_supported_by_storage, Index end_of_reserved)
     {
-        assert(1 <= end_of_reserved.Get());
-        assert(end_of_reserved.Get() < max_supported_by_storage.Get());
-        assert(max_supported_by_storage.Get() < kMaxIndex);
-        for (u64 i = 0; i < end_of_reserved.Get(); i++)
+        Spinlock lock(lock_);
+        uint64_t _end_of_reserved = end_of_reserved.Get();
+        uint64_t _max_supported_by_storage = max_supported_by_storage.Get();
+        assert(1 <= _end_of_reserved);
+        assert(_end_of_reserved < _max_supported_by_storage);
+        for (uint64_t i = 0; i < _end_of_reserved; i++)
         {
             Set(i, kUsed);
         }
-        for (u64 i = end_of_reserved.Get(); i < max_supported_by_storage.Get(); i++)
+        last_allocated_index_ = _end_of_reserved;
+        for (uint64_t i = _end_of_reserved; i < _max_supported_by_storage || i < kMaxIndex; i++)
         {
             Set(i, kUnused);
         }
-        for (u64 i = max_supported_by_storage.Get(); i < kMaxIndex; i++)
+        for (uint64_t i = _max_supported_by_storage; i < kMaxIndex; i++)
         {
             Set(i, kUsed);
         }
-    }
-    void Write(void *buf)
-    {
-        memcpy(buf, buf_, kSize);
-    }
-    void Read(void *buf)
-    {
-        memcpy(buf_, buf, kSize);
-    }
-    void Dump(int max)
-    {
-        printf("X");
-        if (max == 0 || max < 0 || max > kMaxIndex)
+        for (int i = 0; i < kSize / kChunkSize; i++)
         {
-            max = kMaxIndex;
+            needs_written_[i] = true;
         }
-        for (u64 i = 1; i < max; i++)
+    }
+    bool NeedsWrite(size_t offset)
+    {
+        return needs_written_[offset / kChunkSize];
+    }
+    void Write(size_t offset, void *buf)
+    {
+        Spinlock lock(lock_);
+        assert((offset % kChunkSize) == 0);
+        assert(needs_written_[offset / kChunkSize]);
+        memcpy(buf, buf_ + offset, kChunkSize);
+        needs_written_[offset / kChunkSize] = false;
+    }
+    void Read(size_t offset, void *buf)
+    {
+        Spinlock lock(lock_);
+
+        assert((offset % kChunkSize) == 0);
+        memcpy(buf_ + offset, buf, kChunkSize);
+        needs_written_[offset / kChunkSize] = false;
+    }
+    void Dump(int start, int end)
+    {
+        for (uint64_t i = start; i < end; i++)
         {
             printf("%c", Get(i) == kUsed ? 'X' : '-');
         }
@@ -92,28 +126,43 @@ public:
     }
     Index FindUnused()
     {
-        for (u64 i = 1; i < kMaxIndex; i++)
+        Spinlock lock(lock_);
+        for (uint64_t i = last_allocated_index_; i < kMaxIndex; i++)
         {
             if (Get(i) == kUnused)
             {
                 Set(i, kUsed);
+                SetDirtyFlag(i, true);
+                last_allocated_index_ = i;
                 return Chunkmap::Index::CreateFromIndex(i);
             }
         }
-        return Chunkmap::Index::CreateNull();
+        for (uint64_t i = 1; i < last_allocated_index_; i++)
+        {
+            if (Get(i) == kUnused)
+            {
+                Set(i, kUsed);
+                SetDirtyFlag(i, true);
+                last_allocated_index_ = i;
+                return Chunkmap::Index::CreateFromIndex(i);
+            }
+        }
+        return Chunkmap::Index();
     }
     void Release(Index i)
     {
+        Spinlock lock(lock_);
         if (i.IsNull())
         {
             return;
         }
         assert(Get(i.Get()) == kUsed);
         Set(i.Get(), kUnused);
+        SetDirtyFlag(i.Get(), true);
     }
 
 private:
-    void Set(u64 index, bool flag)
+    void Set(uint64_t index, bool flag)
     {
         if (index > kMaxIndex)
         {
@@ -128,7 +177,7 @@ private:
             buf_[index / 8] &= ~(1 << (index % 8));
         }
     }
-    bool Get(u64 index)
+    bool Get(uint64_t index)
     {
         if (index > kMaxIndex)
         {
@@ -136,8 +185,61 @@ private:
         }
         return ((buf_[index / 8] >> (index % 8)) & 1) == 1;
     }
-    char buf_[kSize];
-    static const u64 kMaxIndex = kSize * 8;
+    void SetDirtyFlag(uint64_t index, bool flag)
+    {
+        needs_written_[index / (kChunkSize * 8)] = flag;
+    }
+    uint8_t *buf_;
+    bool needs_written_[kSize / kChunkSize];
+    static const uint64_t kMaxIndex = kSize * 8;
     static const bool kUsed = true;
     static const bool kUnused = false;
+    uint64_t last_allocated_index_ = 1;
+    std::atomic<int> lock_;
 };
+
+#if 0
+int test()
+{
+    {
+        Chunkmap cmap;
+        char buf[kChunkSize];
+        assert(!cmap.Write(0, buf));
+    }
+    {
+        Chunkmap cmap;
+        cmap.FindUnused();
+        char buf[kChunkSize];
+        assert(cmap.Write(0, buf));
+    }
+    {
+        Chunkmap cmap;
+        cmap.FindUnused();
+        char buf[kChunkSize];
+        assert(cmap.Write(0, buf));
+        assert(!cmap.Write(0, buf));
+    }
+    {
+        Chunkmap cmap;
+        cmap.FindUnused();
+        char buf[kChunkSize];
+        cmap.Read(0, buf);
+        assert(!cmap.Write(0, buf));
+    }
+    {
+        Chunkmap cmap;
+        auto i = cmap.FindUnused();
+        char buf[kChunkSize];
+        assert(cmap.Write(0, buf));
+        assert(!cmap.Write(0, buf));
+        cmap.Release(i);
+        assert(cmap.Write(0, buf));
+    }
+    {
+        Chunkmap cmap;
+        cmap.Create(Chunkmap::Index::CreateFromIndex(10), Chunkmap::Index::CreateFromIndex(3));
+        char buf[kChunkSize];
+        assert(cmap.Write(0, buf));
+    }
+}
+#endif

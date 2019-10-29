@@ -6,6 +6,7 @@
 #include <vector>
 #include <utility>
 #include <deque>
+#include <atomic>
 #include "misc.h"
 #include "chunkmap.h"
 #include "cache.h"
@@ -30,7 +31,7 @@ public:
   Inode(Inode &&) = delete;
   Inode() = delete;
   Inode &operator=(Inode &&) = delete;
-  static Inode *CreateEmpty(std::string fname, int lock, Chunkmap &chunkmap, const unvme_ns_t *ns, size_t blocksize, int qid)
+  static Inode *CreateEmpty(std::string fname, int lock, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper)
   {
     Chunkmap::Index cindex = chunkmap.FindUnused();
     if (cindex.IsNull())
@@ -39,27 +40,21 @@ public:
       return nullptr;
     }
     std::vector<u64> chunks;
-    chunks.push_back(cindex.GetPos() / ns->blocksize);
-    return new Inode(fname, chunks, lock, 0, chunkmap, ns, blocksize, qid);
+    chunks.push_back(cindex.GetPos() / ns_wrapper.GetBlockSize());
+    return new Inode(fname, chunks, 0, chunkmap, ns_wrapper);
   }
-  static Inode *CreateFromBuffer(const char *buf, Chunkmap &chunkmap, const unvme_ns_t *ns, size_t blocksize, int &pos, int qid)
+  static Inode *CreateFromBuffer(HeaderBuffer &buf, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper)
   {
-    pos = 0;
-    auto fname = std::string(buf + pos);
-    pos += AlignUp(fname.length() + 1);
-    size_t chunk_num = *((__typeof__(chunk_num) *)(buf + pos));
-    pos += sizeof(chunk_num);
+    auto fname = buf.GetString();
+    size_t chunk_num = buf.Get<__typeof__(chunk_num)>();
     __typeof__(Inode::chunks_) chunks;
     for (size_t i = 0; i < chunk_num; i++)
     {
-      chunks.push_back(*((__typeof__(Inode::chunks_[0]) *)(buf + pos)));
-      pos += sizeof(Inode::chunks_[0]);
+      auto chunk = buf.Get<__typeof__(Inode::chunks_[0])>();
+      chunks.push_back(chunk);
     }
-    __typeof__(Inode::lock_) lock = *((__typeof__(Inode::lock_) *)(buf + pos));
-    pos += sizeof(Inode::lock_);
-    __typeof__(Inode::len_) len = *((__typeof__(Inode::len_) *)(buf + pos));
-    pos += sizeof(Inode::len_);
-    Inode *inode = new Inode(fname, chunks, lock, len, chunkmap, ns, blocksize, qid);
+    auto len = buf.Get<__typeof__(Inode::len_)>();
+    Inode *inode = new Inode(fname, chunks, len, chunkmap, ns_wrapper);
     inode->inode_updated_ = false;
     return inode;
   }
@@ -68,7 +63,7 @@ public:
     for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
     {
       Cache *cache = *it;
-      unvme_free(ns_, cache->Release());
+      ns_wrapper_.Free(cache->Release());
       delete cache;
     }
     cache_list_.clear();
@@ -90,7 +85,7 @@ public:
       {
         u64 released_chunk = chunks_.back();
         chunks_.pop_back();
-        Chunkmap::Index cindex = Chunkmap::Index::CreateFromPos(released_chunk * ns_->blocksize);
+        Chunkmap::Index cindex = Chunkmap::Index::CreateFromPos(released_chunk * ns_wrapper_.GetBlockSize());
         chunkmap_.Release(cindex);
       }
     }
@@ -104,7 +99,7 @@ public:
         {
           return Status::kIoError;
         }
-        chunks_.push_back(cindex.GetPos() / ns_->blocksize);
+        chunks_.push_back(cindex.GetPos() / ns_wrapper_.GetBlockSize());
       }
     }
     len_ = len;
@@ -129,7 +124,7 @@ public:
   {
     assert(CheckOffset(offset));
     int chunk_index = offset / kChunkSize;
-    return chunks_[chunk_index] + (u64)((offset % kChunkSize) / blocksize_);
+    return chunks_[chunk_index] + (u64)((offset % kChunkSize) / ns_wrapper_.GetBlockSize());
   }
   size_t GetNextChunkBoundary(size_t offset)
   {
@@ -143,38 +138,24 @@ public:
     fname_ = fname;
     inode_updated_ = true;
   }
-  size_t HeaderWrite(char *buf, size_t pos_max)
+  void HeaderWrite(HeaderBuffer &buf)
   {
-    size_t pos = 0;
     size_t chunk_num = chunks_.size();
 
-    if (AlignUp(fname_.length() + 1) + sizeof(chunk_num) + sizeof(chunks_[0]) * chunk_num + sizeof(lock_) + sizeof(len_) > pos_max)
-    {
-      fprintf(stderr, "header overflowed\n");
-      exit(1);
-    }
-    memcpy(buf, fname_.c_str(), fname_.length());
+    buf.AppendRaw(fname_.c_str(), fname_.length());
+    buf.Append('\0');
+    buf.AlignPos();
 
-    buf[fname_.length()] = '\0';
-    pos += AlignUp(fname_.length() + 1);
-
-    memcpy(buf + pos, &chunk_num, sizeof(chunk_num));
-    pos += sizeof(chunk_num);
+    buf.Append(chunk_num);
 
     for (size_t i = 0; i < chunk_num; i++)
     {
-      memcpy(buf + pos, &chunks_[i], sizeof(chunks_[i]));
-      pos += sizeof(chunks_[i]);
+      buf.Append(chunks_[i]);
     }
 
-    memcpy(buf + pos, &lock_, sizeof(lock_));
-    pos += sizeof(lock_);
-
-    memcpy(buf + pos, &len_, sizeof(len_));
-    pos += sizeof(len_);
+    buf.Append(len_);
 
     inode_updated_ = false;
-    return pos;
   }
   Cache *FindFromCacheList(ChunkIndex cindex)
   {
@@ -199,18 +180,18 @@ public:
     }
     // could not find
     // create one
-    vfio_dma_t *dma = unvme_alloc(ns_, kChunkSize);
+    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
     if (!dma)
     {
-      nvme_printf("allocation failure\n");
-      return Status::kTryAgain;
+      printf("allocation failure\n");
+      exit(1);
     }
     if (!createnew_ifmissing)
     {
       u64 lba = GetLba(cindex.GetPos());
-      u32 bnum = kChunkSize / ns_->blocksize;
+      u32 bnum = kChunkSize / ns_wrapper_.GetBlockSize();
 
-      unvme_iod_t iod = unvme_aread(ns_, qid_, dma->buf, lba, bnum);
+      unvme_iod_t iod = ns_wrapper_.Aread(dma->buf, lba, bnum);
       if (!iod)
       {
         fprintf(stderr, "cr^ %ld %d\n", lba, bnum);
@@ -235,19 +216,19 @@ public:
     }
     // could not find
     // create one
-    vfio_dma_t *dma = unvme_alloc(ns_, kChunkSize);
+    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
     if (!dma)
     {
-      nvme_printf("allocation failure\n");
-      return Status::kTryAgain;
+      printf("allocation failure\n");
+      exit(1);
     }
     if (!createnew_ifmissing)
     {
       u64 lba = GetLba(cindex.GetPos());
-      u32 bnum = kChunkSize / ns_->blocksize;
+      u32 bnum = kChunkSize / ns_wrapper_.GetBlockSize();
 
-      unvme_iod_t iod = unvme_aread(ns_, qid_, dma->buf, lba, bnum);
-      if (!iod || unvme_apoll(iod, UNVME_TIMEOUT))
+      unvme_iod_t iod = ns_wrapper_.Aread(dma->buf, lba, bnum);
+      if (!iod || ns_wrapper_.Apoll(iod))
       {
         fprintf(stderr, "cr^ %ld %d\n", lba, bnum);
         fprintf(stderr, "VEFS: read failed\n");
@@ -281,51 +262,53 @@ public:
         }
         RegisterWaitingContext(ctx);
       }
-      else
-      {
-        unvme_free(ns_, c->Release());
-      }
+      ns_wrapper_.Free(c->Release());
       delete c;
     }
     return Status::kOk;
   }
   void RetrieveContexts()
   {
-    uint64_t ctime = ve_gettime();
-    while (!io_waiting_queue_.empty())
+    while (true)
     {
-      auto itr = io_waiting_queue_.begin();
-      if (ctime < (*itr).time + 2 * 1000 * 1000)
+      Spinlock lock(io_waiting_queue_lock_);
+      if (io_waiting_queue_.empty())
+      {
+        return;
+      }
+      auto it = io_waiting_queue_.begin();
+      Inode::AsyncIoContext ctx = *it;
+      if (ns_wrapper_.ApollWithoutWait(ctx.iod) != 0)
       {
         break;
       }
-      if (unvme_apoll((*itr).iod, UNVME_TIMEOUT))
-      {
-        printf("failed to unvme_write");
-        exit(1);
-      }
-      if ((*itr).dma)
-      {
-        unvme_free(ns_, (*itr).dma);
-      }
+      ctx = *it;
       io_waiting_queue_.pop_front();
+      if (ctx.dma)
+      {
+        ns_wrapper_.Free(ctx.dma);
+      }
     }
   }
   void WaitIoCompletion()
   {
-    while (!io_waiting_queue_.empty())
+    std::deque<Inode::AsyncIoContext> queue;
     {
-      auto itr = io_waiting_queue_.begin();
-      if (unvme_apoll((*itr).iod, UNVME_TIMEOUT))
+      Spinlock lock(io_waiting_queue_lock_);
+      queue = io_waiting_queue_;
+      io_waiting_queue_.clear();
+    }
+    for (auto it = queue.begin(); it != queue.end(); ++it)
+    {
+      if (ns_wrapper_.Apoll((*it).iod))
       {
         printf("failed to unvme_write");
         exit(1);
       }
-      if ((*itr).dma)
+      if ((*it).dma)
       {
-        unvme_free(ns_, (*itr).dma);
+        ns_wrapper_.Free((*it).dma);
       }
-      io_waiting_queue_.pop_front();
     }
   }
   bool Sync()
@@ -349,6 +332,7 @@ public:
   }
   void RegisterWaitingContext(AsyncIoContext ctx)
   {
+    Spinlock lock(io_waiting_queue_lock_);
     io_waiting_queue_.push_back(ctx);
   }
   void Delete()
@@ -357,7 +341,7 @@ public:
     WaitIoCompletion();
     for (auto it = chunks_.begin(); it != chunks_.end(); ++it)
     {
-      chunkmap_.Release(Chunkmap::Index::CreateFromPos(*it * ns_->blocksize));
+      chunkmap_.Release(Chunkmap::Index::CreateFromPos(*it * ns_wrapper_.GetBlockSize()));
     }
   }
   std::string &GetFname()
@@ -365,21 +349,23 @@ public:
     return fname_;
   }
 
+  std::atomic<int> &GetLock()
+  {
+    return lock_;
+  }
+
 private:
-  // TODO: qid would not work on multi thread
-  Inode(std::string fname, std::vector<u64> &chunks, int lock, size_t len, Chunkmap &chunkmap, const unvme_ns_t *ns, size_t blocksize, int qid) : chunkmap_(chunkmap), ns_(ns) /*, append_cache_(ns)*/, qid_(qid)
+  Inode(std::string fname, std::vector<u64> &chunks, size_t len, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper) : lock_(0), chunkmap_(chunkmap), ns_wrapper_(ns_wrapper), io_waiting_queue_lock_(0)
   {
     fname_ = fname;
     chunks_ = chunks;
-    lock_ = lock;
     len_ = len;
-    blocksize_ = blocksize;
     inode_updated_ = true;
   }
   Status CacheSync(Cache *cache, Inode::AsyncIoContext &ctx)
   {
-    std::pair<vfio_dma_t *, ChunkIndex> sinfo = cache->MarkSynced(unvme_alloc(ns_, kChunkSize));
-    unvme_iod_t iod = unvme_awrite(ns_, qid_, sinfo.first->buf, GetLba(sinfo.second.GetPos()), kChunkSize / ns_->blocksize);
+    std::pair<vfio_dma_t *, ChunkIndex> sinfo = cache->MarkSynced(ns_wrapper_.AllocChunk());
+    unvme_iod_t iod = ns_wrapper_.Awrite(sinfo.first->buf, GetLba(sinfo.second.GetPos()), kChunkSize / ns_wrapper_.GetBlockSize());
     if (!iod)
     {
       fprintf(stderr, "VEFS: cache awrite failed\n");
@@ -392,16 +378,17 @@ private:
     };
     return Status::kOk;
   }
+
+  std::atomic<int> lock_;
+
   std::string fname_;
   std::vector<u64> chunks_;
-  int lock_;
   size_t len_;
 
   Chunkmap &chunkmap_;
-  const unvme_ns_t *ns_;
-  size_t blocksize_;
+  UnvmeWrapper &ns_wrapper_;
   std::deque<AsyncIoContext> io_waiting_queue_;
-  const int qid_;
+  std::atomic<int> io_waiting_queue_lock_;
 
   bool inode_updated_;
 

@@ -7,7 +7,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
-
+#include "spinlock.h"
 #include "misc.h"
 #include "inode.h"
 #include "header.h"
@@ -22,23 +22,22 @@ public:
     kTryAgain,
   };
   Vefs()
-      : ns_(ns_wrapper_.ns_),
-        header_(ns_, GetQnum()),
-        qcnt_(0)
+      : header_(ns_wrapper_)
   {
-    if (header_.GetBlockSize() % ns_->blocksize != 0)
+    if (header_.GetBlockSize() % ns_wrapper_.GetBlockSize() != 0)
     {
       fprintf(stderr, "unsupported blocksize\n");
       exit(1);
     }
-    printf("%s qc=%d/%d qs=%d/%d bc=%#lx bs=%d maxbpio=%d\n", ns_->device, ns_->qcount,
-           ns_->maxqcount, ns_->qsize, ns_->maxqsize, ns_->blockcount,
-           ns_->blocksize, ns_->maxbpio);
   }
   ~Vefs()
   {
-    header_.WriteSync(GetQnum());
+    header_.WriteSync();
     header_.Release();
+  }
+  void Dump()
+  {
+    header_.Dump();
   }
   static Vefs *Get()
   {
@@ -48,13 +47,10 @@ public:
     }
     return vefs_.get();
   }
-  const unvme_ns_t *GetNs()
-  {
-    return ns_;
-  }
 
   Status Truncate(Inode *inode, size_t size)
   {
+    Spinlock lock(inode->GetLock());
     if (inode->Truncate(size) != Inode::Status::kOk)
     {
       return Status::kIoError;
@@ -64,28 +60,37 @@ public:
 
   size_t GetLen(Inode *inode)
   {
-    return inode->GetLen();
+    Spinlock lock(inode->GetLock());
+    size_t len = inode->GetLen();
+    if (kRedirect)
+    {
+      FILE *fp = fopen((inode->GetFname()).c_str(), "rb");
+      fseek(fp, 0, SEEK_END);
+      if (len != ftell(fp))
+      {
+        printf("length comparison failed %s\n", (inode->GetFname()).c_str());
+        exit(1);
+      }
+      fclose(fp);
+    }
+    return len;
   }
 
   void Sync(Inode *inode)
   {
+    Spinlock lock(inode->GetLock());
+    uint64_t time1 = ve_gettime_debug();
     if (inode->Sync())
     {
-      header_.WriteSync(GetQnum());
+      header_.WriteSync();
     }
     HardWrite();
+    t3 += ve_gettime_debug() - time1;
   }
 
   void HardWrite()
   {
-    vfio_dma_t *dma = unvme_alloc(ns_, ns_->blocksize); // dummy
-    u32 cdw10_15[6];                                    // dummy
-    int stat = unvme_cmd(ns_, GetQnum(), NVME_CMD_FLUSH, ns_->id, dma->buf, 512, cdw10_15, 0);
-    if (stat)
-    {
-      printf("failed to sync");
-    }
-    unvme_free(ns_, dma);
+    ns_wrapper_.HardWrite();
   }
 
   Status Append(Inode *inode, const void *data, size_t size)
@@ -111,8 +116,6 @@ public:
     return Write(inode, inode->GetLen(), data, size);
   }
 
-  u16 GetBlockSize() { return ns_->blocksize; }
-
   Inode *GetInode(const std::string &fname)
   {
     return header_.GetInode(fname);
@@ -120,35 +123,43 @@ public:
 
   void Delete(Inode *inode)
   {
-    if (kRedirect)
     {
-      remove(inode->GetFname().c_str());
+      Spinlock lock(inode->GetLock());
+      if (kRedirect)
+      {
+        remove(inode->GetFname().c_str());
+      }
+      // printf("Vefs::Delete %s\n", inode->fname.c_str());
+      inode->Delete();
     }
-    // printf("Vefs::Delete %s\n", inode->fname.c_str());
-    inode->Delete();
     header_.Delete(inode);
   }
 
   void Rename(Inode *inode, const std::string &fname)
   {
+    Spinlock lock(inode->GetLock());
     if (kRedirect)
     {
       rename(inode->GetFname().c_str(), fname.c_str());
     }
     if (DoesExist(fname))
     {
-      Delete(Create(fname, false));
+      Inode *dinode = Create(fname, false);
+      assert(dinode);
+      Delete(dinode);
     }
     inode->Rename(fname);
   }
 
   bool DoesExist(const std::string &fname)
   {
+    vefs_printf("de[%s]\n", fname.c_str());
     return header_.DoesExist(fname);
   }
   Inode *Create(const std::string &fname, bool lock)
   {
-    return header_.Create(fname, lock, GetQnum());
+    vefs_printf("c[%s]\n", fname.c_str());
+    return header_.Create(fname, lock);
   }
   Status GetChildren(const std::string &dir,
                      std::vector<std::string> *result)
@@ -159,10 +170,13 @@ public:
 
   Status Write(Inode *inode, size_t offset, const void *data, size_t size)
   {
-    debug_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
+    Spinlock lock(inode->GetLock());
+    uint64_t time1 = ve_gettime_debug();
+    vefs_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
     if (kRedirect)
     {
-      int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
+      std::string fname = inode->GetFname();
+      int fd = open(fname.c_str(), O_RDWR | O_CREAT);
       pwrite(fd, data, size, offset);
       close(fd);
     }
@@ -212,7 +226,7 @@ public:
     for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
     {
       unvme_iod_t iod = *it;
-      if (unvme_apoll(iod, UNVME_TIMEOUT))
+      if (ns_wrapper_.Apoll(iod))
       {
         fprintf(stderr, "VEFS: apoll failed\n");
         return Status::kIoError;
@@ -228,6 +242,7 @@ public:
         if (csize == 0)
         {
           inode->ShrinkCacheListIfNeeded();
+          t2 += ve_gettime_debug() - time1;
           return Status::kOk;
         }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -251,6 +266,8 @@ public:
   Status
   Read(Inode *inode, uint64_t offset, size_t size, char *scratch)
   {
+    Spinlock lock(inode->GetLock());
+    uint64_t time1 = ve_gettime_debug();
     size_t flen = inode->GetLen();
     if (offset + size > flen)
     {
@@ -301,7 +318,7 @@ public:
     for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
     {
       unvme_iod_t iod = *it;
-      if (unvme_apoll(iod, UNVME_TIMEOUT))
+      if (ns_wrapper_.Apoll(iod))
       {
         fprintf(stderr, "VEFS: apoll failed\n");
         return Status::kIoError;
@@ -317,7 +334,7 @@ public:
         if (csize == 0)
         {
           inode->ShrinkCacheListIfNeeded();
-          debug_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
+          vefs_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
           if (kRedirect)
           {
             void *buf = malloc(size);
@@ -331,6 +348,7 @@ public:
             free(buf);
             close(fd);
           }
+          t1 += ve_gettime_debug() - time1;
           return Status::kOk;
         }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -353,33 +371,19 @@ public:
   }
 
 private:
-  int GetQnum()
-  {
-    if (qnum_ == -1)
-    {
-      qnum_ = qcnt_.fetch_add(1);
-      if ((u32)qnum_ >= ns_->maxqcount)
-      {
-        fprintf(stderr, "error: not enough queues for threads\n");
-        abort();
-      }
-    }
-    return qnum_;
-  }
-
   template <class T>
   T Align(T val)
   {
-    return align(val, ns_->blocksize);
+    return align(val, ns_wrapper_.GetBlockSize());
   }
   template <class T>
   T AlignUp(T val)
   {
-    return alignup(val, ns_->blocksize);
+    return alignup(val, ns_wrapper_.GetBlockSize());
   }
   u32 GetBlockNumFromSize(size_t size)
   {
-    return getblocknum_from_size(size, ns_->blocksize);
+    return getblocknum_from_size(size, ns_wrapper_.GetBlockSize());
   }
   template <class T>
   T AlignChunk(T val)
@@ -392,22 +396,7 @@ private:
     return alignup(val, kChunkSize);
   }
 
-  class UnvmeWrapper
-  {
-  public:
-    UnvmeWrapper() : ns_(unvme_open("b3:00.0"))
-    {
-    }
-    ~UnvmeWrapper()
-    {
-      unvme_close(ns_);
-    }
-    const unvme_ns_t *ns_;
-  } ns_wrapper_;
-
-  const unvme_ns_t *ns_;
+  UnvmeWrapper ns_wrapper_;
   Header header_;
-  std::atomic<uint> qcnt_;
   static std::unique_ptr<Vefs> vefs_;
-  static thread_local int qnum_;
 };
