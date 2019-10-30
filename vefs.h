@@ -78,14 +78,14 @@ public:
 
   void Sync(Inode *inode)
   {
-    Spinlock lock(inode->GetLock());
     uint64_t time1 = ve_gettime_debug();
+    Spinlock lock(inode->GetLock());
     if (inode->Sync())
     {
       header_.WriteSync();
     }
-    HardWrite();
     t3 += ve_gettime_debug() - time1;
+    HardWrite();
   }
 
   void HardWrite()
@@ -170,8 +170,8 @@ public:
 
   Status Write(Inode *inode, size_t offset, const void *data, size_t size)
   {
-    Spinlock lock(inode->GetLock());
     uint64_t time1 = ve_gettime_debug();
+    Spinlock lock(inode->GetLock());
     vefs_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
     if (kRedirect)
     {
@@ -266,8 +266,8 @@ public:
   Status
   Read(Inode *inode, uint64_t offset, size_t size, char *scratch)
   {
-    Spinlock lock(inode->GetLock());
     uint64_t time1 = ve_gettime_debug();
+    Spinlock lock(inode->GetLock());
     size_t flen = inode->GetLen();
     if (offset + size > flen)
     {

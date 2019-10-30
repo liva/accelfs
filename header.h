@@ -1,7 +1,7 @@
 #pragma once
-#include <list>
 #include <atomic>
 #include <deque>
+#include <vector>
 #include "spinlock.h"
 #include "misc.h"
 #include "chunkmap.h"
@@ -56,7 +56,7 @@ public:
             if (ns_wrapper_.Apoll((*it).iod))
             {
                 printf("failed to unvme_write");
-                exit(1);
+                abort();
             }
             ns_wrapper_.Free((*it).dma);
         }
@@ -101,7 +101,14 @@ public:
         {
             Spinlock lock(lock_);
             updated_ = true;
-            inodes_.remove(inode);
+            for (auto it = inodes_.begin(); it != inodes_.end(); ++it)
+            {
+                if (*it == inode)
+                {
+                    inodes_.erase(it);
+                    break;
+                }
+            }
         }
         inode->Sync();
         inode->Release();
@@ -156,9 +163,7 @@ private:
             {
                 continue;
             }
-            uint64_t time2 = ve_gettime_debug();
             vfio_dma_t *dma = ns_wrapper_.AllocChunk();
-            t4 += ve_gettime_debug() - time2;
             if (!dma)
             {
                 printf("allocation failure\n");
@@ -170,7 +175,7 @@ private:
             if (!iod)
             {
                 printf("failed to unvme_write");
-                exit(1);
+                abort();
             }
             ctxs.push_back(Inode::AsyncIoContext{
                 .iod = iod,
@@ -188,7 +193,7 @@ private:
     static const u64 kDataStorageStartPos = kChunkmapStartPos + Chunkmap::kSize;
     UnvmeWrapper &ns_wrapper_;
     std::atomic<int> lock_;
-    std::list<Inode *> inodes_;
+    std::vector<Inode *> inodes_;
     static const char *kVersionString;
     bool updated_;
     std::vector<Chunkmap::Index> header_exchunks_;
@@ -270,7 +275,7 @@ inline std::deque<Inode::AsyncIoContext> Header::Write()
         if (!iod)
         {
             printf("failed to unvme_write");
-            exit(1);
+            abort();
         }
         ctxs.push_back(Inode::AsyncIoContext{
             .iod = iod,

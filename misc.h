@@ -13,7 +13,7 @@
 
 static const bool kRedirect = false;
 static const bool kHeaderDump = false;
-static const bool kDebugTime = false;
+static const bool kDebugTime = true;
 
 extern uint64_t tmp_var;
 static inline uint64_t ve_gettime()
