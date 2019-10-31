@@ -182,9 +182,14 @@ public:
     {
       return Status::kOk;
     }
+    MEASURE_TIME;
     // could not find
     // create one
-    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+    vfio_dma_t *dma;
+    {
+      MEASURE_TIME;
+      dma = ns_wrapper_.AllocChunk();
+    }
     if (!dma)
     {
       printf("allocation failure\n");
@@ -215,6 +220,7 @@ public:
       return Status::kOk;
     }
     uint64_t border_ticket = cache_ticket_ - 8;
+    MEASURE_TIME;
     for (auto it = cache_list_.begin(); it != cache_list_.end();)
     {
       Cache *c = (*it).second;
@@ -226,6 +232,7 @@ public:
         // flush current cache
         if (c->IsWriteNeeded())
         {
+          MEASURE_TIME;
           AsyncIoContext ctx;
           if (CacheSync(c, index, ctx) != Status::kOk)
           {

@@ -15,7 +15,6 @@ static const bool kRedirect = false;
 static const bool kHeaderDump = false;
 static const bool kDebugTime = true;
 
-extern uint64_t tmp_var;
 static inline uint64_t ve_gettime()
 {
     uint64_t ret;
@@ -25,18 +24,56 @@ static inline uint64_t ve_gettime()
                  : "r"(vehva));
     return ((uint64_t)1000 * ret) / 800;
 }
-extern uint64_t tmp_var;
-static inline uint64_t ve_gettime_debug()
+
+struct TimeInfo;
+extern std::vector<TimeInfo *> time_list_;
+struct TimeInfo
 {
-    if (kDebugTime)
+    TimeInfo(std::string fname, int line)
     {
-        return ve_gettime();
+        if (kDebugTime)
+        {
+            fname_ = fname;
+            line_ = line;
+            time_list_.push_back(this);
+        }
     }
-    else
+
+    std::string fname_;
+    int line_;
+    uint64_t time_ = 0;
+    uint64_t count_ = 0;
+};
+
+class TimeMeasure
+{
+public:
+    TimeMeasure(TimeInfo &ti) : ti_(ti)
     {
-        return 0;
+        if (kDebugTime)
+        {
+            time_ = ve_gettime();
+        }
     }
-}
+    ~TimeMeasure()
+    {
+        if (kDebugTime)
+        {
+            ti_.time_ += ve_gettime() - time_;
+            ti_.count_++;
+        }
+    }
+
+private:
+    TimeInfo &ti_;
+    uint64_t time_;
+};
+
+#define MEASURE_TIME                                             \
+    static TimeInfo ti##__LINE__(__PRETTY_FUNCTION__, __LINE__); \
+    TimeMeasure tm##__LINE__(ti##__LINE__);
+
+void DumpTime();
 
 template <class T, class U>
 inline T align(T val, U blocksize)
@@ -264,5 +301,3 @@ public:
     int pos_ = 0;
     std::vector<char> buf_;
 };
-
-extern uint64_t t1, t2, t3, t4;

@@ -78,13 +78,12 @@ public:
 
   void Sync(Inode *inode)
   {
-    uint64_t time1 = ve_gettime_debug();
+    MEASURE_TIME;
     Spinlock lock(inode->GetLock());
     if (inode->Sync())
     {
       header_.WriteSync();
     }
-    t3 += ve_gettime_debug() - time1;
     HardWrite();
   }
 
@@ -170,7 +169,7 @@ public:
 
   Status Write(Inode *inode, size_t offset, const void *data, size_t size)
   {
-    uint64_t time1 = ve_gettime_debug();
+    MEASURE_TIME;
     Spinlock lock(inode->GetLock());
     vefs_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
     if (kRedirect)
@@ -242,7 +241,6 @@ public:
         if (csize == 0)
         {
           inode->ShrinkCacheListIfNeeded();
-          t2 += ve_gettime_debug() - time1;
           return Status::kOk;
         }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -266,7 +264,7 @@ public:
   Status
   Read(Inode *inode, uint64_t offset, size_t size, char *scratch)
   {
-    uint64_t time1 = ve_gettime_debug();
+    MEASURE_TIME;
     Spinlock lock(inode->GetLock());
     size_t flen = inode->GetLen();
     if (offset + size > flen)
@@ -348,7 +346,6 @@ public:
             free(buf);
             close(fd);
           }
-          t1 += ve_gettime_debug() - time1;
           return Status::kOk;
         }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
