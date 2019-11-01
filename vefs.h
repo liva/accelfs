@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include "spinlock.h"
 #include "misc.h"
+#include "unvme_wrapper.h"
 #include "inode.h"
 #include "header.h"
 
@@ -274,10 +275,11 @@ public:
     inode->RetrieveContexts();
 
     std::deque<unvme_iod_t> iod_queue;
+    size_t coffset = offset;
+    char *cdata = scratch;
+    size_t csize = size;
     {
-      size_t coffset = offset;
-      char *cdata = scratch;
-      size_t csize = size;
+      MEASURE_TIME;
       while (true)
       {
         if (csize == 0)
@@ -313,13 +315,16 @@ public:
       }
     }
 
-    for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
     {
-      unvme_iod_t iod = *it;
-      if (ns_wrapper_.Apoll(iod))
+      MEASURE_TIME;
+      for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
       {
-        fprintf(stderr, "VEFS: apoll failed\n");
-        return Status::kIoError;
+        unvme_iod_t iod = *it;
+        if (ns_wrapper_.Apoll(iod))
+        {
+          fprintf(stderr, "VEFS: apoll failed\n");
+          return Status::kIoError;
+        }
       }
     }
 

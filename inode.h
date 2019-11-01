@@ -3,13 +3,13 @@
 #include <deque>
 #include <string>
 #include <list>
-#include <unordered_map>
 #include <vector>
 #include <utility>
 #include <deque>
 #include <atomic>
 #include "misc.h"
 #include "chunkmap.h"
+#include "unvme_wrapper.h"
 #include "cache.h"
 
 class Inode
@@ -63,10 +63,13 @@ public:
   {
     for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
     {
-      Cache *cache = (*it).second;
-      assert(!cache->IsWriteNeeded());
-      ns_wrapper_.Free(cache->Release());
-      delete cache;
+      Cache &cache = (*it).second;
+      if (!cache.IsValid())
+      {
+        continue;
+      }
+      assert(!cache.IsWriteNeeded());
+      ns_wrapper_.Free(cache.Release());
     }
     cache_list_.clear();
   }
@@ -161,14 +164,14 @@ public:
     auto it = cache_list_.begin();
     for (; it != cache_list_.end(); ++it)
     {
-      if ((*it).first == cindex)
+      if ((*it).second.IsValid() && (*it).first == cindex)
       {
         break;
       }
     }
     if (it != cache_list_.end())
     {
-      Cache *cache = (*it).second;
+      Cache *cache = &((*it).second);
       cache->SetTicket(cache_ticket_);
       cache_ticket_++;
       return cache;
@@ -182,14 +185,9 @@ public:
     {
       return Status::kOk;
     }
-    MEASURE_TIME;
     // could not find
     // create one
-    vfio_dma_t *dma;
-    {
-      MEASURE_TIME;
-      dma = ns_wrapper_.AllocChunk();
-    }
+    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
     if (!dma)
     {
       printf("allocation failure\n");
@@ -209,30 +207,38 @@ public:
       }
       queue.push_back(iod);
     }
-    cache_list_.push_back(std::make_pair(cindex, new Cache(dma)));
+    auto it = cache_list_.begin();
+    for (; it != cache_list_.end(); ++it)
+    {
+      if (!(*it).second.IsValid())
+      {
+        (*it).first = cindex;
+        (*it).second.Reset(Cache(dma));
+        break;
+      }
+    }
+    if (it == cache_list_.end())
+    {
+      cache_list_.push_back(std::move(std::make_pair(cindex, Cache(dma))));
+    }
 
     return Status::kOk;
   }
   Status ShrinkCacheListIfNeeded()
   {
-    if (cache_list_.size() < 16)
+    MEASURE_TIME
+    uint64_t border_ticket = cache_ticket_ - 16;
+    std::vector<std::pair<ChunkIndex, Cache>> tmp_buf;
+    for (int i = 0; i < cache_list_.size(); i++)
     {
-      return Status::kOk;
-    }
-    uint64_t border_ticket = cache_ticket_ - 8;
-    MEASURE_TIME;
-    for (auto it = cache_list_.begin(); it != cache_list_.end();)
-    {
-      Cache *c = (*it).second;
-      if (c->GetTicket() <= border_ticket)
+      Cache &c = cache_list_[i].second;
+      if (c.IsValid() && c.GetTicket() <= border_ticket)
       {
-        ChunkIndex index = (*it).first;
-        it = cache_list_.erase(it);
+        ChunkIndex index = cache_list_[i].first;
 
         // flush current cache
-        if (c->IsWriteNeeded())
+        if (c.IsWriteNeeded())
         {
-          MEASURE_TIME;
           AsyncIoContext ctx;
           if (CacheSync(c, index, ctx) != Status::kOk)
           {
@@ -241,12 +247,8 @@ public:
           }
           RegisterWaitingContext(ctx);
         }
-        ns_wrapper_.Free(c->Release());
-        delete c;
-
-        continue;
+        ns_wrapper_.Free(c.Release());
       }
-      ++it;
     }
     return Status::kOk;
   }
@@ -299,8 +301,12 @@ public:
     for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
     {
       ChunkIndex index = (*it).first;
-      Cache *c = (*it).second;
-      if (c->IsWriteNeeded())
+      Cache &c = (*it).second;
+      if (!c.IsValid())
+      {
+        continue;
+      }
+      if (c.IsWriteNeeded())
       {
         AsyncIoContext ctx;
         if (CacheSync(c, index, ctx) != Status::kOk)
@@ -346,9 +352,9 @@ private:
     len_ = len;
     inode_updated_ = true;
   }
-  Status CacheSync(Cache *cache, ChunkIndex index, Inode::AsyncIoContext &ctx)
+  Status CacheSync(Cache &cache, ChunkIndex index, Inode::AsyncIoContext &ctx)
   {
-    vfio_dma_t *dma = cache->MarkSynced(ns_wrapper_.AllocChunk());
+    vfio_dma_t *dma = cache.MarkSynced(ns_wrapper_.AllocChunk());
     unvme_iod_t iod = ns_wrapper_.Awrite(dma->buf, GetLba(index.GetPos()), kChunkSize / ns_wrapper_.GetBlockSize());
     if (!iod)
     {
@@ -376,7 +382,7 @@ private:
 
   bool inode_updated_;
 
-  std::vector<std::pair<ChunkIndex, Cache *>> cache_list_;
+  std::vector<std::pair<ChunkIndex, Cache>> cache_list_;
   uint64_t cache_ticket_ = 0;
   static size_t AlignUp(size_t len)
   {

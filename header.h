@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "misc.h"
 #include "chunkmap.h"
+#include "unvme_wrapper.h"
 
 class Header
 {
@@ -236,57 +237,60 @@ inline std::deque<Inode::AsyncIoContext> Header::Write()
 
     u64 hchunk_pos = kHeaderStartPos;
     size_t extra_chunk = 0;
-    while (true)
     {
-        vfio_dma_t *dma = ns_wrapper_.AllocChunk();
-        if (!dma)
+        while (true)
         {
-            printf("allocation failure\n");
-            exit(1);
-        }
-        size_t output_size = content_buf.Output(reinterpret_cast<char *>(dma->buf) + info_size, kChunkSize - info_size);
-        bool output_completed = (output_size != kChunkSize - info_size);
-
-        HeaderBuffer buf;
-        buf.AppendRaw(kVersionString, strlen(kVersionString));
-        u64 next_header = 0;
-        if (!output_completed)
-        {
-            assert(header_exchunks_.size() >= extra_chunk);
-            if (extra_chunk == header_exchunks_.size())
+            vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+            if (!dma)
             {
-                auto c = chunkmap_.FindUnused();
-                if (c.IsNull())
-                {
-                    printf("failed to allocate an extra chunk for header\n");
-                    exit(1);
-                }
-                header_exchunks_.push_back(c);
+                printf("allocation failure\n");
+                exit(1);
             }
-            next_header = header_exchunks_[extra_chunk].GetPos();
-            extra_chunk++;
-        }
-        buf.Append(next_header);
-        buf.ResetPos();
-        buf.Output(dma->buf, kChunkSize);
+            size_t output_size = content_buf.Output(reinterpret_cast<char *>(dma->buf) + info_size, kChunkSize - info_size);
+            bool output_completed = (output_size != kChunkSize - info_size);
 
-        unvme_iod_t iod = ns_wrapper_.Awrite(dma->buf, GetBlockNumFromSize(hchunk_pos),
-                                             GetBlockNumFromSize(kChunkSize));
-        if (!iod)
-        {
-            printf("failed to unvme_write");
-            abort();
+            HeaderBuffer buf;
+            buf.AppendRaw(kVersionString, strlen(kVersionString));
+            u64 next_header = 0;
+            if (!output_completed)
+            {
+                assert(header_exchunks_.size() >= extra_chunk);
+                if (extra_chunk == header_exchunks_.size())
+                {
+                    auto c = chunkmap_.FindUnused();
+                    if (c.IsNull())
+                    {
+                        printf("failed to allocate an extra chunk for header\n");
+                        exit(1);
+                    }
+                    header_exchunks_.push_back(c);
+                }
+                next_header = header_exchunks_[extra_chunk].GetPos();
+                extra_chunk++;
+            }
+            buf.Append(next_header);
+            buf.ResetPos();
+            buf.Output(dma->buf, kChunkSize);
+
+            unvme_iod_t iod = ns_wrapper_.Awrite(dma->buf, GetBlockNumFromSize(hchunk_pos),
+                                                 GetBlockNumFromSize(kChunkSize));
+            if (!iod)
+            {
+                printf("failed to unvme_write");
+                abort();
+            }
+            MEASURE_TIME;
+            ctxs.push_back(Inode::AsyncIoContext{
+                .iod = iod,
+                .dma = dma,
+                .time = ve_gettime(),
+            });
+            if (output_completed)
+            {
+                break;
+            }
+            hchunk_pos = next_header;
         }
-        ctxs.push_back(Inode::AsyncIoContext{
-            .iod = iod,
-            .dma = dma,
-            .time = ve_gettime(),
-        });
-        if (output_completed)
-        {
-            break;
-        }
-        hchunk_pos = next_header;
     }
     assert(extra_chunk <= header_exchunks_.size());
     for (size_t i = extra_chunk; i < header_exchunks_.size(); i++)

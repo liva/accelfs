@@ -1,12 +1,12 @@
 #pragma once
 #include <assert.h>
-#include <unordered_map>
 #include "spinlock.h"
 #include "misc.h"
 
 class ChunkIndex
 {
 public:
+    ChunkIndex() = delete;
     ChunkIndex(const ChunkIndex &i) : index_(i.index_)
     {
     }
@@ -36,38 +36,65 @@ public:
     }
 
 private:
-    ChunkIndex() = delete;
     ChunkIndex(u64 index) : index_(index)
     {
     }
     u64 index_;
 };
 
-namespace std
-{
-template <>
-class hash<ChunkIndex>
-{
-public:
-    size_t operator()(const ChunkIndex &p) const { return p.Get(); }
-};
-} // namespace std
-
 class Cache
 {
 public:
     Cache() = delete;
-    Cache(vfio_dma_t *dma) : lock_(0), dma_(dma)
+    /*    Cache(const Cache &c) : lock_(0)
     {
+        dma_ = c.dma_;
+        needs_written_ = c.needs_written_;
+        ticket_ = c.ticket_;
+    }
+    Cache &operator=(const Cache &c)
+    {
+        dma_ = c.dma_;
+        needs_written_ = c.needs_written_;
+        ticket_ = c.ticket_;
+        return *this;
+    }*/
+    Cache(Cache &&c) : lock_(0)
+    {
+        Spinlock lock(c.lock_);
+        dma_ = c.dma_;
+        needs_written_ = c.needs_written_;
+        ticket_ = c.ticket_;
+        c.dma_ = nullptr;
+        c.needs_written_ = false;
+    }
+    Cache(vfio_dma_t *dma) : lock_(0)
+    {
+        dma_ = dma;
         needs_written_ = false;
     }
     ~Cache()
     {
         assert(dma_ == nullptr);
+        assert(!needs_written_);
+    }
+    void Reset(Cache &&c)
+    {
+        assert(!IsValid());
+        Spinlock lock(c.lock_);
+        dma_ = c.dma_;
+        needs_written_ = c.needs_written_;
+        ticket_ = c.ticket_;
+        c.dma_ = nullptr;
+        c.needs_written_ = false;
+    }
+    bool IsValid()
+    {
+        return dma_ != nullptr;
     }
     bool IsWriteNeeded()
     {
-        return needs_written_;
+        return IsValid() && needs_written_;
     }
     vfio_dma_t *MarkSynced(vfio_dma_t *ndma)
     {
