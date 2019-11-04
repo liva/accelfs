@@ -10,7 +10,7 @@ extern bool debug_flag; //debug
 
 static const bool kRedirect = false;
 static const bool kHeaderDump = false;
-static const bool kDebugTime = false;
+static const bool kDebugTime = true;
 
 static inline uint64_t ve_gettime()
 {

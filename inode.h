@@ -270,10 +270,14 @@ public:
 
     return Status::kOk;
   }
-  Status ShrinkCacheListIfNeeded()
+  Status ShrinkCacheListIfNeeded(int keep_num)
   {
     MEASURE_TIME
-    uint64_t border_ticket = cache_ticket_ - 32;
+    if (keep_num < 32)
+    {
+      keep_num = 32;
+    }
+    uint64_t border_ticket = cache_ticket_ - keep_num;
     std::vector<std::pair<ChunkIndex, Cache>> tmp_buf;
     for (int i = 0; i < cache_list_.size(); i++)
     {

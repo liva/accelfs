@@ -1,5 +1,6 @@
 #pragma once
 #include <assert.h>
+//#include <unordered_map>
 #include "spinlock.h"
 #include "misc.h"
 
@@ -41,7 +42,17 @@ private:
     }
     u64 index_;
 };
-
+/*
+namespace std
+{
+template <>
+class hash<ChunkIndex>
+{
+public:
+    size_t operator()(const ChunkIndex &p) const { return p.Get(); }
+};
+} // namespace std
+*/
 class Cache
 {
 public:

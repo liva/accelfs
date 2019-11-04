@@ -135,14 +135,9 @@ public:
 
   void Delete(Inode *inode)
   {
+    if (kRedirect)
     {
-      Spinlock lock(inode->GetLock());
-      if (kRedirect)
-      {
-        remove(inode->GetFname().c_str());
-      }
-      // printf("Vefs::Delete %s\n", inode->fname.c_str());
-      inode->Delete();
+      remove(inode->GetFname().c_str());
     }
     header_.Delete(inode);
   }
@@ -253,7 +248,7 @@ public:
       {
         if (csize == 0)
         {
-          inode->ShrinkCacheListIfNeeded();
+          inode->ShrinkCacheListIfNeeded(0);
           return Status::kOk;
         }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -280,6 +275,10 @@ public:
     MEASURE_TIME;
     Spinlock lock(inode->GetLock());
     size_t flen = inode->GetLen();
+    if (offset > flen)
+    {
+      return Status::kOk;
+    }
     if (offset + size > flen)
     {
       size = flen - offset;
@@ -289,7 +288,7 @@ public:
     std::deque<unvme_iod_t> iod_queue;
     size_t coffset = offset;
     char *cdata = scratch;
-    size_t csize = size + kChunkSize;
+    size_t csize = size * 2; //size + kChunkSize;
     if (coffset + csize > flen)
     {
       csize = flen - coffset;
@@ -338,7 +337,7 @@ public:
       {
         if (csize == 0)
         {
-          inode->ShrinkCacheListIfNeeded();
+          inode->ShrinkCacheListIfNeeded(size / kChunkSize + 1);
           vefs_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
           if (kRedirect)
           {

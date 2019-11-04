@@ -141,7 +141,12 @@ public:
                 }
             }
         }
-        inode->Release();
+        {
+            Spinlock lock(inode->GetLock());
+            // printf("Vefs::Delete %s\n", inode->fname.c_str());
+            inode->Delete();
+            inode->Release();
+        }
         delete inode;
     }
     void Dump()
