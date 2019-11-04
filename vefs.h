@@ -289,25 +289,15 @@ public:
     std::deque<unvme_iod_t> iod_queue;
     size_t coffset = offset;
     char *cdata = scratch;
-    size_t csize = size;
+    size_t csize = size + kChunkSize;
+    if (coffset + csize > flen)
+    {
+      csize = flen - coffset;
+    }
     {
       MEASURE_TIME;
-      while (true)
+      while (csize != 0)
       {
-        if (csize == 0)
-        {
-          uint64_t nc_offset = AlignChunkUp(coffset);
-          if (nc_offset < flen)
-          {
-            // prefetch
-            ChunkIndex cindex = ChunkIndex::CreateFromPos(nc_offset);
-            if (inode->PrepareCache(cindex, false, iod_queue) != Inode::Status::kOk)
-            {
-              return Status::kIoError;
-            }
-          }
-          break;
-        }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
         size_t io_size = (coffset + csize > boundary) ? boundary - coffset : csize;
 
