@@ -80,11 +80,23 @@ public:
   void Sync(Inode *inode)
   {
     MEASURE_TIME;
-    Spinlock lock(inode->GetLock());
-    if (inode->Sync())
+    bool inode_updated_flag;
+    std::vector<Inode::AsyncIoContext> ctxs;
+    {
+      Spinlock lock(inode->GetLock());
+      inode_updated_flag = inode->IsUpdated();
+      inode->CacheListSync();
+      inode->SyncChunkList();
+    }
+    if (inode_updated_flag)
     {
       header_.WriteSync();
     }
+    {
+      Spinlock lock(inode->GetLock());
+      inode->WaitIoCompletion();
+    }
+
     HardWrite();
   }
 
@@ -137,7 +149,6 @@ public:
 
   void Rename(Inode *inode, const std::string &fname)
   {
-    Spinlock lock(inode->GetLock());
     if (kRedirect)
     {
       rename(inode->GetFname().c_str(), fname.c_str());
@@ -148,6 +159,7 @@ public:
       assert(dinode);
       Delete(dinode);
     }
+    Spinlock lock(inode->GetLock());
     inode->Rename(fname);
   }
 

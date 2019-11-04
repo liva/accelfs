@@ -1,8 +1,9 @@
 #!/bin/sh -xe
-docker build docker -t vefs-build-base:develop
-docker run --rm -it -v $PWD:$PWD -w $PWD vefs-build-base:develop /opt/nec/nosupport/llvm-ve/bin/clang++ -O2 --target=ve-linux --std=c++11 -c vefs.cc
+OPTION="-O2 -DNDEBUG"
+#OPTION="-g"
+docker run --rm -it -v $PWD:$PWD -w $PWD unvme:ve /opt/nec/nosupport/llvm-ve/bin/clang++ --target=ve-linux --std=c++11 $OPTION -c vefs.cc
 docker rm -f vefs || :
-docker run -d --name vefs -it -v $PWD:$PWD -w $PWD vefs-build-base:develop sh
+docker run -d --name vefs -it -v $PWD:$PWD -w $PWD unvme:ve sh
 #docker exec -it vefs python -c 'import extract_archive; print extract_archive.extract_archive("/opt/nec/ve/lib/libvedio.a", "workdir")'
 docker exec -it vefs rm -f libvefs.a
 docker exec -it vefs /opt/nec/nosupport/llvm-ve/bin/llvm-ar rcs libvefs.a vefs.o

@@ -16,7 +16,7 @@ class UnvmeWrapper
 public:
     UnvmeWrapper() : ns_(unvme_open("b3:00.0")), lock_(0), alloc_lock_(0)
     {
-        printf("%s qc=%d/%d qs=%d/%d bc=%#lx bs=%d maxbpio=%d\n", ns_->device, ns_->qcount,
+        printf("qc=%d/%d qs=%d/%d bc=%#lx bs=%d maxbpio=%d\n", ns_->qcount,
                ns_->maxqcount, ns_->qsize, ns_->maxqsize, ns_->blockcount,
                ns_->blocksize, ns_->maxbpio);
     }
@@ -85,6 +85,24 @@ public:
     {
         Spinlock lock(lock_);
         return unvme_read(ns_, 0, buf, slba, nlb);
+    }
+    int AreadChunk(u64 lba, vfio_dma_t *&dma, unvme_iod_t &iod)
+    {
+        dma = AllocChunk();
+        if (!dma)
+        {
+            printf("allocation failure\n");
+            exit(1);
+        }
+        u32 bnum = kChunkSize / GetBlockSize();
+        iod = Aread(dma->buf, lba, bnum);
+        if (!iod)
+        {
+            fprintf(stderr, "r^ %ld %d\n", lba, bnum);
+            fprintf(stderr, "VEFS: read failed\n");
+            return -1;
+        }
+        return 0;
     }
     unvme_iod_t Aread(void *buf, u64 slba, u32 nlb)
     {

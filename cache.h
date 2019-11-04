@@ -121,6 +121,14 @@ public:
         assert(offset + n <= kChunkSize);
         memcpy(buf, reinterpret_cast<u8 *>(dma_->buf) + offset, n);
     }
+    vfio_dma_t *ForceRelease()
+    {
+        Spinlock lock(lock_);
+        vfio_dma_t *dma = dma_;
+        needs_written_ = false;
+        dma_ = nullptr;
+        return dma;
+    }
     vfio_dma_t *Release()
     {
         Spinlock lock(lock_);

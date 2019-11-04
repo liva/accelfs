@@ -6,9 +6,11 @@
 #include <vector>
 #include "_misc.h"
 
+extern bool debug_flag; //debug
+
 static const bool kRedirect = false;
 static const bool kHeaderDump = false;
-static const bool kDebugTime = true;
+static const bool kDebugTime = false;
 
 static inline uint64_t ve_gettime()
 {
