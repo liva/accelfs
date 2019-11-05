@@ -199,7 +199,6 @@ public:
       }
     }
 
-    std::deque<unvme_iod_t> iod_queue;
     {
       size_t coffset = offset;
       const char *cdata = data_;
@@ -219,7 +218,7 @@ public:
         ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
         bool createnew_ifmissing = (coffset == noffset && io_size == kChunkSize) || (oldsize <= noffset);
-        if (inode->PrepareCache(cindex, createnew_ifmissing, iod_queue) != Inode::Status::kOk)
+        if (inode->PrepareCache(cindex, createnew_ifmissing) != Inode::Status::kOk)
         {
           return Status::kIoError;
         }
@@ -227,16 +226,6 @@ public:
         coffset += io_size;
         cdata += io_size;
         csize -= io_size;
-      }
-    }
-
-    for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
-    {
-      unvme_iod_t iod = *it;
-      if (ns_wrapper_.Apoll(iod))
-      {
-        fprintf(stderr, "VEFS: apoll failed\n");
-        return Status::kIoError;
       }
     }
 
@@ -261,6 +250,7 @@ public:
 
         Cache *cache = inode->FindFromCacheList(cindex);
         assert(cache != nullptr);
+        inode->ApollIod(*cache);
         cache->Refresh(cdata, coffset - noffset, io_size);
 
         coffset += io_size;
@@ -285,16 +275,15 @@ public:
     }
     inode->RetrieveContexts();
 
-    std::deque<unvme_iod_t> iod_queue;
     size_t coffset = offset;
     char *cdata = scratch;
-    size_t csize = size * 2; //size + kChunkSize;
-    if (coffset + csize > flen)
+    size_t prefetch_offset = AlignChunkUp(offset + size * 2);
+    if (prefetch_offset > flen)
     {
-      csize = flen - coffset;
+      prefetch_offset = flen;
     }
+    size_t csize = prefetch_offset - offset; //size + kChunkSize;
     {
-      MEASURE_TIME;
       while (csize != 0)
       {
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -305,7 +294,7 @@ public:
         assert(ndsize == kChunkSize);
         ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
-        if (inode->PrepareCache(cindex, false, iod_queue) != Inode::Status::kOk)
+        if (inode->PrepareCache(cindex, false) != Inode::Status::kOk)
         {
           return Status::kIoError;
         }
@@ -317,19 +306,6 @@ public:
     }
 
     {
-      MEASURE_TIME;
-      for (auto it = iod_queue.begin(); it != iod_queue.end(); ++it)
-      {
-        unvme_iod_t iod = *it;
-        if (ns_wrapper_.Apoll(iod))
-        {
-          fprintf(stderr, "VEFS: apoll failed\n");
-          return Status::kIoError;
-        }
-      }
-    }
-
-    {
       size_t coffset = offset;
       char *cdata = scratch;
       size_t csize = size;
@@ -337,7 +313,7 @@ public:
       {
         if (csize == 0)
         {
-          inode->ShrinkCacheListIfNeeded(size / kChunkSize + 1);
+          inode->ShrinkCacheListIfNeeded((prefetch_offset - AlignChunk(offset)) / kChunkSize);
           vefs_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
           if (kRedirect)
           {
@@ -364,6 +340,7 @@ public:
 
         Cache *cache = inode->FindFromCacheList(cindex);
         assert(cache != nullptr);
+        inode->ApollIod(*cache);
         cache->Apply(cdata, coffset - noffset, io_size);
 
         coffset += io_size;

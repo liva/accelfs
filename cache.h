@@ -3,6 +3,7 @@
 //#include <unordered_map>
 #include "spinlock.h"
 #include "misc.h"
+#include "unvme.h"
 
 class ChunkIndex
 {
@@ -42,8 +43,8 @@ private:
     }
     u64 index_;
 };
-/*
-namespace std
+
+/*namespace std
 {
 template <>
 class hash<ChunkIndex>
@@ -56,7 +57,12 @@ public:
 class Cache
 {
 public:
-    Cache() = delete;
+    Cache() : lock_(0)
+    {
+        dma_ = nullptr;
+        iod_ = nullptr;
+        needs_written_ = false;
+    }
     /*    Cache(const Cache &c) : lock_(0)
     {
         dma_ = c.dma_;
@@ -74,18 +80,23 @@ public:
     {
         Spinlock lock(c.lock_);
         dma_ = c.dma_;
+        iod_ = c.iod_;
         needs_written_ = c.needs_written_;
         ticket_ = c.ticket_;
         c.dma_ = nullptr;
+        c.iod_ = nullptr;
         c.needs_written_ = false;
     }
-    Cache(vfio_dma_t *dma) : lock_(0)
+    Cache(uint64_t ticket, vfio_dma_t *dma, unvme_iod_t iod) : lock_(0)
     {
+        ticket_ = ticket;
         dma_ = dma;
+        iod_ = iod;
         needs_written_ = false;
     }
     ~Cache()
     {
+        assert(iod_ == nullptr);
         assert(dma_ == nullptr);
         assert(!needs_written_);
     }
@@ -94,9 +105,11 @@ public:
         assert(!IsValid());
         Spinlock lock(c.lock_);
         dma_ = c.dma_;
+        iod_ = c.iod_;
         needs_written_ = c.needs_written_;
         ticket_ = c.ticket_;
         c.dma_ = nullptr;
+        c.iod_ = nullptr;
         c.needs_written_ = false;
     }
     bool IsValid()
@@ -111,6 +124,7 @@ public:
     {
         Spinlock lock(lock_);
         assert(needs_written_);
+        assert(iod_ == nullptr);
         memcpy(ndma->buf, dma_->buf, kChunkSize);
         needs_written_ = false;
         vfio_dma_t *rdma = dma_;
@@ -121,6 +135,7 @@ public:
     void Refresh(const char *buf, size_t offset, size_t n)
     {
         Spinlock lock(lock_);
+        assert(iod_ == nullptr);
         assert(offset + n <= kChunkSize);
         memcpy(reinterpret_cast<u8 *>(dma_->buf) + offset, buf, n);
         needs_written_ = true;
@@ -129,12 +144,14 @@ public:
     void Apply(char *buf, size_t offset, size_t n)
     {
         Spinlock lock(lock_);
+        assert(iod_ == nullptr);
         assert(offset + n <= kChunkSize);
         memcpy(buf, reinterpret_cast<u8 *>(dma_->buf) + offset, n);
     }
     vfio_dma_t *ForceRelease()
     {
         Spinlock lock(lock_);
+        assert(iod_ == nullptr);
         vfio_dma_t *dma = dma_;
         needs_written_ = false;
         dma_ = nullptr;
@@ -144,7 +161,9 @@ public:
     {
         Spinlock lock(lock_);
         assert(!needs_written_);
+        assert(iod_ == nullptr);
         vfio_dma_t *dma = dma_;
+        iod_ = nullptr;
         dma_ = nullptr;
         return dma;
     }
@@ -156,10 +175,17 @@ public:
     {
         ticket_ = ticket;
     }
+    unvme_iod_t ReleaseIod()
+    {
+        unvme_iod_t iod = iod_;
+        iod_ = nullptr;
+        return iod;
+    }
 
 private:
     std::atomic<int> lock_;
     vfio_dma_t *dma_;
+    unvme_iod_t iod_;
     bool needs_written_;
     uint64_t ticket_;
 };
