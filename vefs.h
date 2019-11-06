@@ -282,7 +282,7 @@ public:
     {
       prefetch_offset = flen;
     }
-    size_t csize = prefetch_offset - offset; //size + kChunkSize;
+    size_t csize = prefetch_offset - offset;
     {
       while (csize != 0)
       {
