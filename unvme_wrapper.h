@@ -114,6 +114,45 @@ public:
         Spinlock lock(lock_);
         return unvme_awrite(ns_, 0, buf, slba, nlb);
     }
+    vfio_dma_t *Alloc(size_t size)
+    {
+        if (size > 2 * 1024 * 1024)
+        {
+            printf("unvme dma memory allocation failure.\n");
+            abort();
+        }
+        vfio_dma_t *dma;
+        {
+            Spinlock lock(lock_);
+            dma = unvme_alloc(ns_, size);
+        }
+        {
+            Spinlock lock(alloc_lock_);
+            memleak_count_ += dma->size;
+        }
+        return dma;
+    }
+    void AllocChunk(int chunknum, vfio_dma_t **dma_array)
+    {
+        int i = 0;
+        {
+            Spinlock lock(alloc_lock_);
+            memleak_count_ += kChunkSize * chunknum;
+            while (!chunk_pool_.empty() && i < chunknum)
+            {
+                auto it = chunk_pool_.end();
+                --it;
+                dma_array[i] = *it;
+                chunk_pool_.pop_back();
+                i++;
+            }
+        }
+        Spinlock lock(lock_);
+        for (; i < chunknum; i++)
+        {
+            dma_array[i] = unvme_alloc(ns_, kChunkSize);
+        }
+    }
     vfio_dma_t *AllocChunk()
     {
         {

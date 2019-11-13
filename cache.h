@@ -1,14 +1,12 @@
 #pragma once
 #include <assert.h>
-//#include <unordered_map>
-#include "spinlock.h"
 #include "misc.h"
 #include "unvme.h"
 
 class ChunkIndex
 {
 public:
-    ChunkIndex() = delete;
+    ChunkIndex() : index_(0) {}
     ChunkIndex(const ChunkIndex &i) : index_(i.index_)
     {
     }
@@ -57,115 +55,84 @@ public:
 class Cache
 {
 public:
-    Cache() : lock_(0)
+    Cache()
     {
-        dma_ = nullptr;
-        iod_ = nullptr;
+        is_valid_ = false;
         needs_written_ = false;
     }
-    /*    Cache(const Cache &c) : lock_(0)
+    Cache(Cache &&c)
     {
-        dma_ = c.dma_;
+        is_valid_ = c.is_valid_;
+        if (is_valid_)
+        {
+            memcpy(buf_, c.buf_, kChunkSize);
+        }
         needs_written_ = c.needs_written_;
         ticket_ = c.ticket_;
-    }
-    Cache &operator=(const Cache &c)
-    {
-        dma_ = c.dma_;
-        needs_written_ = c.needs_written_;
-        ticket_ = c.ticket_;
-        return *this;
-    }*/
-    Cache(Cache &&c) : lock_(0)
-    {
-        Spinlock lock(c.lock_);
-        dma_ = c.dma_;
-        iod_ = c.iod_;
-        needs_written_ = c.needs_written_;
-        ticket_ = c.ticket_;
-        c.dma_ = nullptr;
-        c.iod_ = nullptr;
+        c.is_valid_ = false;
         c.needs_written_ = false;
     }
-    Cache(uint64_t ticket, vfio_dma_t *dma, unvme_iod_t iod) : lock_(0)
+    Cache(uint64_t ticket, void *buf)
     {
         ticket_ = ticket;
-        dma_ = dma;
-        iod_ = iod;
+        memcpy(buf_, buf, kChunkSize);
+        is_valid_ = true;
         needs_written_ = false;
     }
     ~Cache()
     {
-        assert(iod_ == nullptr);
-        assert(dma_ == nullptr);
+        assert(!IsValid());
         assert(!needs_written_);
     }
     void Reset(Cache &&c)
     {
         assert(!IsValid());
-        Spinlock lock(c.lock_);
-        dma_ = c.dma_;
-        iod_ = c.iod_;
+        is_valid_ = c.is_valid_;
+        if (is_valid_)
+        {
+            memcpy(buf_, c.buf_, kChunkSize);
+        }
         needs_written_ = c.needs_written_;
         ticket_ = c.ticket_;
-        c.dma_ = nullptr;
-        c.iod_ = nullptr;
+        c.is_valid_ = false;
         c.needs_written_ = false;
     }
     bool IsValid()
     {
-        return dma_ != nullptr;
+        return is_valid_;
     }
     bool IsWriteNeeded()
     {
         return IsValid() && needs_written_;
     }
-    vfio_dma_t *MarkSynced(vfio_dma_t *ndma)
+    void MarkSynced(void *buf)
     {
-        Spinlock lock(lock_);
         assert(needs_written_);
-        assert(iod_ == nullptr);
-        memcpy(ndma->buf, dma_->buf, kChunkSize);
+        memcpy(buf, buf_, kChunkSize);
         needs_written_ = false;
-        vfio_dma_t *rdma = dma_;
-        dma_ = ndma;
-        return rdma;
     }
     // cache <- buf
     void Refresh(const char *buf, size_t offset, size_t n)
     {
-        Spinlock lock(lock_);
-        assert(iod_ == nullptr);
         assert(offset + n <= kChunkSize);
-        memcpy(reinterpret_cast<u8 *>(dma_->buf) + offset, buf, n);
+        memcpy(buf_ + offset, buf, n);
         needs_written_ = true;
     }
     // buf <- cache
     void Apply(char *buf, size_t offset, size_t n)
     {
-        Spinlock lock(lock_);
-        assert(iod_ == nullptr);
         assert(offset + n <= kChunkSize);
-        memcpy(buf, reinterpret_cast<u8 *>(dma_->buf) + offset, n);
+        memcpy(buf, buf_ + offset, n);
     }
-    vfio_dma_t *ForceRelease()
+    void ForceRelease()
     {
-        Spinlock lock(lock_);
-        assert(iod_ == nullptr);
-        vfio_dma_t *dma = dma_;
         needs_written_ = false;
-        dma_ = nullptr;
-        return dma;
+        is_valid_ = false;
     }
-    vfio_dma_t *Release()
+    void Release()
     {
-        Spinlock lock(lock_);
         assert(!needs_written_);
-        assert(iod_ == nullptr);
-        vfio_dma_t *dma = dma_;
-        iod_ = nullptr;
-        dma_ = nullptr;
-        return dma;
+        is_valid_ = false;
     }
     uint64_t GetTicket()
     {
@@ -175,17 +142,10 @@ public:
     {
         ticket_ = ticket;
     }
-    unvme_iod_t ReleaseIod()
-    {
-        unvme_iod_t iod = iod_;
-        iod_ = nullptr;
-        return iod;
-    }
 
 private:
-    std::atomic<int> lock_;
-    vfio_dma_t *dma_;
-    unvme_iod_t iod_;
+    char buf_[kChunkSize];
     bool needs_written_;
+    bool is_valid_;
     uint64_t ticket_;
 };

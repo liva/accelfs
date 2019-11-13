@@ -113,8 +113,7 @@ public:
         continue;
       }
       assert(!cache.IsWriteNeeded());
-      ApollIod(cache);
-      ns_wrapper_.Free(cache.Release());
+      cache.Release();
     }
     cache_list_.clear();
   }
@@ -148,10 +147,9 @@ public:
         continue;
       }
       ChunkIndex cindex = (*it).first;
-      if (cindex.GetPos() > len)
+      if (cindex.GetPos() >= len)
       {
-        ApollIod(c);
-        ns_wrapper_.Free(c.ForceRelease());
+        c.ForceRelease();
       }
     }
     return Status::kOk;
@@ -221,6 +219,30 @@ public:
     }
     return nullptr;
   }
+  void RegisterToCache(const int num, ChunkIndex cindex, void *buf)
+  {
+    int i = 0;
+    auto it = cache_list_.begin();
+    for (; it != cache_list_.end() && i < num; ++it)
+    {
+      if (!(*it).second.IsValid())
+      {
+        (*it).first = cindex;
+        (*it).second.Reset(Cache(cache_ticket_, buf));
+        i++;
+        cindex = ChunkIndex::CreateFromIndex(cindex.Get() + 1);
+        buf = (void *)((char *)buf + kChunkSize);
+        cache_ticket_++;
+      }
+    }
+    for (; i < num; i++)
+    {
+      cache_list_.push_back(std::move(std::make_pair(cindex, Cache(cache_ticket_, buf))));
+      cindex = ChunkIndex::CreateFromIndex(cindex.Get() + 1);
+      buf = (void *)((char *)buf + kChunkSize);
+      cache_ticket_++;
+    }
+  }
   Status PrepareCache(ChunkIndex cindex, bool createnew_ifmissing)
   {
     Cache *c = FindFromCacheList(cindex);
@@ -246,6 +268,7 @@ public:
     if (!createnew_ifmissing)
     {
       iod = ns_wrapper_.Aread(dma->buf, lba, kChunkSize / ns_wrapper_.GetBlockSize());
+      ns_wrapper_.Apoll(iod);
     }
     auto it = cache_list_.begin();
     for (; it != cache_list_.end(); ++it)
@@ -253,14 +276,15 @@ public:
       if (!(*it).second.IsValid())
       {
         (*it).first = cindex;
-        (*it).second.Reset(Cache(cache_ticket_, dma, iod));
+        (*it).second.Reset(Cache(cache_ticket_, dma->buf));
         break;
       }
     }
     if (it == cache_list_.end())
     {
-      cache_list_.push_back(std::move(std::make_pair(cindex, Cache(cache_ticket_, dma, iod))));
+      cache_list_.push_back(std::move(std::make_pair(cindex, Cache(cache_ticket_, dma->buf))));
     }
+    ns_wrapper_.Free(dma);
     cache_ticket_++;
 
     return Status::kOk;
@@ -270,6 +294,10 @@ public:
     if (keep_num < 32)
     {
       keep_num = 32;
+    }
+    if (cache_ticket_ < keep_num)
+    {
+      return Status::kOk;
     }
     uint64_t border_ticket = cache_ticket_ - keep_num;
     std::vector<std::pair<ChunkIndex, Cache>> tmp_buf;
@@ -291,8 +319,7 @@ public:
           }
           RegisterWaitingContext(ctx);
         }
-        ApollIod(c);
-        ns_wrapper_.Free(c.Release());
+        c.Release();
       }
     }
     return Status::kOk;
@@ -439,17 +466,6 @@ public:
   {
     return lock_;
   }
-  void ApollIod(Cache &c)
-  {
-    unvme_iod_t iod = c.ReleaseIod();
-    if (iod != nullptr)
-    {
-      if (ns_wrapper_.Apoll(iod))
-      {
-        abort();
-      }
-    }
-  }
 
 private:
   Inode(std::string fname, ChunkList *cl, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper) : lock_(0), chunkmap_(chunkmap), ns_wrapper_(ns_wrapper), io_waiting_queue_lock_(0)
@@ -460,8 +476,8 @@ private:
   }
   Status CacheSync(Cache &cache, ChunkIndex index, Inode::AsyncIoContext &ctx)
   {
-    ApollIod(cache);
-    vfio_dma_t *dma = cache.MarkSynced(ns_wrapper_.AllocChunk());
+    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+    cache.MarkSynced(dma->buf);
     u64 lba;
     if (GetLba(index.GetPos(), lba) != Status::kOk)
     {

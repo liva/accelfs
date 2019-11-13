@@ -1,16 +1,44 @@
+#include <stdlib.h>
+#include <string>
 #include "vefs.h"
 
 std::unique_ptr<Vefs> Vefs::vefs_;
 const char *Header::kVersionString = "VEDIOF15";
 std::vector<TimeInfo *> time_list_;
 
+bool debug_time_ = false;
+bool redirect_ = false;
+bool header_dump_ = false;
+
+__attribute__((constructor)) static void init_variables()
+{
+    char *str = getenv("TIME");
+    if (str != nullptr && std::string(str) == "true")
+    {
+        debug_time_ = true;
+    }
+    str = getenv("REDIRECT");
+    if (str != nullptr && std::string(str) == "true")
+    {
+        redirect_ = true;
+    }
+    str = getenv("HEADERDUMP");
+    if (str != nullptr && std::string(str) == "true")
+    {
+        header_dump_ = true;
+    }
+}
+
 void DumpTime()
 {
-    printf("/--/--/--/--/--/--/--/--/--/--/--/--\n");
-    for (auto it = time_list_.begin(); it != time_list_.end(); ++it)
+    if (debug_time_)
     {
-        TimeInfo *ti = *it;
-        printf("%ld\t%ld\t%ld %s:%d\n", ti->time_, ti->count_, ti->time_ / ti->count_, ti->fname_.c_str(), ti->line_);
+        printf("/--/--/--/--/--/--/--/--/--/--/--/--\n");
+        for (auto it = time_list_.begin(); it != time_list_.end(); ++it)
+        {
+            TimeInfo *ti = *it;
+            printf("%ld\t%ld\t%ld %s:%d\n", ti->time_, ti->count_, ti->time_ / ti->count_, ti->fname_.c_str(), ti->line_);
+        }
     }
 }
 

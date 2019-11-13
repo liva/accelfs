@@ -4,13 +4,17 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <vector>
+#include <string>
 #include "_misc.h"
+
+extern bool debug_time_;
+extern bool redirect_;
+extern bool header_dump_;
 
 extern bool debug_flag; //debug
 
-static const bool kRedirect = false;
-static const bool kHeaderDump = false;
-static const bool kDebugTime = true;
+//#pragma clang optimize off
+//#undef NDEBUG
 
 static inline uint64_t ve_gettime()
 {
@@ -28,7 +32,7 @@ struct TimeInfo
 {
     TimeInfo(std::string fname, int line)
     {
-        if (kDebugTime)
+        if (debug_time_)
         {
             fname_ = fname;
             line_ = line;
@@ -47,14 +51,14 @@ class TimeMeasure
 public:
     TimeMeasure(TimeInfo &ti) : ti_(ti)
     {
-        if (kDebugTime)
+        if (debug_time_)
         {
             time_ = ve_gettime();
         }
     }
     ~TimeMeasure()
     {
-        if (kDebugTime)
+        if (debug_time_)
         {
             ti_.time_ += ve_gettime() - time_;
             ti_.count_++;

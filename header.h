@@ -17,7 +17,7 @@ public:
             chunkmap_.Create(Chunkmap::Index::CreateFromPos(ns_wrapper_.GetBlockCount() * ns_wrapper_.GetBlockSize()), Chunkmap::Index::CreateFromPos(kDataStorageStartPos));
             WriteSync();
         }
-        if (kHeaderDump)
+        if (header_dump_)
         {
             Dump();
             chunkmap_.Dump(1, 500);

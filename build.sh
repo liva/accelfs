@@ -1,6 +1,6 @@
 #!/bin/sh -xe
-OPTION="-O2 -DNDEBUG"
-#OPTION="-g"
+OPTION="-g3 -O2 -DNDEBUG"
+#OPTION="-g3"
 docker run --rm -it -v $PWD:$PWD -w $PWD unvme:ve /opt/nec/nosupport/llvm-ve/bin/clang++ --target=ve-linux --std=c++11 $OPTION -c vefs.cc
 docker rm -f vefs || :
 docker run -d --name vefs -it -v $PWD:$PWD -w $PWD unvme:ve sh

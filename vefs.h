@@ -44,9 +44,14 @@ public:
   {
     if (!vefs_)
     {
-      vefs_.reset(new Vefs);
+      Reset();
     }
     return vefs_.get();
+  }
+  static void Reset()
+  {
+    vefs_.reset(nullptr);
+    vefs_.reset(new Vefs);
   }
 
   Status Truncate(Inode *inode, size_t size)
@@ -63,7 +68,7 @@ public:
   {
     Spinlock lock(inode->GetLock());
     size_t len = inode->GetLen();
-    if (kRedirect)
+    if (redirect_)
     {
       FILE *fp = fopen((inode->GetFname()).c_str(), "rb");
       fseek(fp, 0, SEEK_END);
@@ -135,7 +140,7 @@ public:
 
   void Delete(Inode *inode)
   {
-    if (kRedirect)
+    if (redirect_)
     {
       remove(inode->GetFname().c_str());
     }
@@ -144,7 +149,7 @@ public:
 
   void Rename(Inode *inode, const std::string &fname)
   {
-    if (kRedirect)
+    if (redirect_)
     {
       rename(inode->GetFname().c_str(), fname.c_str());
     }
@@ -174,13 +179,12 @@ public:
     header_.GetChildren(dir, result);
     return Status::kOk;
   }
-
   Status Write(Inode *inode, size_t offset, const void *data, size_t size)
   {
     MEASURE_TIME;
     Spinlock lock(inode->GetLock());
     vefs_printf("w[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
-    if (kRedirect)
+    if (redirect_)
     {
       std::string fname = inode->GetFname();
       int fd = open(fname.c_str(), O_RDWR | O_CREAT);
@@ -250,7 +254,6 @@ public:
 
         Cache *cache = inode->FindFromCacheList(cindex);
         assert(cache != nullptr);
-        inode->ApollIod(*cache);
         cache->Refresh(cdata, coffset - noffset, io_size);
 
         coffset += io_size;
@@ -277,12 +280,18 @@ public:
 
     size_t coffset = offset;
     char *cdata = scratch;
-    size_t prefetch_offset = AlignChunkUp(offset + size * 2);
-    if (prefetch_offset > flen)
+    size_t csize = size;
+    struct ReadIoContext
     {
-      prefetch_offset = flen;
-    }
-    size_t csize = prefetch_offset - offset;
+      uint64_t lba;
+      ChunkIndex cindex;
+      size_t inblock_offset;
+      size_t size;
+      char *data;
+      vfio_dma_t *dma;
+      unvme_iod_t iod;
+    };
+    std::vector<ReadIoContext> io_list;
     {
       while (csize != 0)
       {
@@ -291,12 +300,50 @@ public:
 
         size_t noffset = AlignChunk(coffset);
         size_t ndsize = AlignChunkUp(io_size);
+        size_t inblock_offset = coffset - noffset;
         assert(ndsize == kChunkSize);
         ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
-        if (inode->PrepareCache(cindex, false) != Inode::Status::kOk)
+        Cache *cache = inode->FindFromCacheList(cindex);
+        if (cache == nullptr)
         {
-          return Status::kIoError;
+          uint64_t lba;
+          if (inode->GetLba(cindex.GetPos(), lba) != Inode::Status::kOk)
+          {
+            return Status::kIoError;
+          }
+          bool new_ioctx = true;
+          if (!io_list.empty())
+          {
+            ReadIoContext &ctx = io_list.back();
+            size_t pctx_iosize = ctx.inblock_offset + ctx.size;
+            if (ChunkIndex::CreateFromPos(ctx.cindex.GetPos() + pctx_iosize) == cindex &&
+                ctx.lba + pctx_iosize / ns_wrapper_.GetBlockSize() == lba &&
+                pctx_iosize + io_size <= 2 * 1024 * 1024)
+            {
+              assert((pctx_iosize % kChunkSize) == 0);
+              assert(inblock_offset == 0);
+              ctx.size += io_size;
+
+              new_ioctx = false;
+            }
+          }
+          if (new_ioctx)
+          {
+            io_list.push_back(ReadIoContext{
+                lba,
+                cindex,
+                inblock_offset,
+                io_size,
+                cdata,
+                nullptr,
+                nullptr,
+            });
+          }
+        }
+        else
+        {
+          cache->Apply(cdata, coffset - noffset, io_size);
         }
 
         coffset += io_size;
@@ -306,6 +353,51 @@ public:
     }
 
     {
+      for (auto it = io_list.begin(); it != io_list.end(); ++it)
+      {
+        size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
+        vfio_dma_t *dma = ns_wrapper_.Alloc(size);
+        it->iod = ns_wrapper_.Aread(dma->buf, it->lba, size / ns_wrapper_.GetBlockSize());
+        it->dma = dma;
+      }
+    }
+
+    inode->ShrinkCacheListIfNeeded(0);
+    {
+      int dma_index = 0;
+      for (auto it = io_list.begin(); it != io_list.end(); ++it)
+      {
+        if (ns_wrapper_.Apoll(it->iod))
+        {
+          printf("unvme apoll failed\n");
+          abort();
+        }
+        MEASURE_TIME;
+        size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
+        int chunknum = static_cast<int>(size / kChunkSize);
+        inode->RegisterToCache(chunknum, it->cindex, it->dma->buf);
+        memcpy(it->data, (char *)it->dma->buf + it->inblock_offset, it->size);
+        ns_wrapper_.Free(it->dma);
+      }
+    }
+
+    vefs_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
+    if (redirect_)
+    {
+      void *buf = malloc(size);
+      int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
+      pread(fd, buf, size, offset);
+      if (memcmp(buf, scratch, size) != 0)
+      {
+        printf("check failed %s %lu %zu\n", inode->GetFname().c_str(), offset, size);
+        exit(1);
+      }
+      free(buf);
+      close(fd);
+    }
+    return Status::kOk;
+    /*
+    {
       size_t coffset = offset;
       char *cdata = scratch;
       size_t csize = size;
@@ -314,21 +406,6 @@ public:
         if (csize == 0)
         {
           inode->ShrinkCacheListIfNeeded((prefetch_offset - AlignChunk(offset)) / kChunkSize);
-          vefs_printf("r[%s %lu %lu]\n", inode->GetFname().c_str(), offset, size);
-          if (kRedirect)
-          {
-            void *buf = malloc(size);
-            int fd = open((inode->GetFname()).c_str(), O_RDWR | O_CREAT);
-            pread(fd, buf, size, offset);
-            if (memcmp(buf, scratch, size) != 0)
-            {
-              printf("check failed %s %lu %zu\n", inode->GetFname().c_str(), offset, size);
-              exit(1);
-            }
-            free(buf);
-            close(fd);
-          }
-          return Status::kOk;
         }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
         size_t io_size = (coffset + csize > boundary) ? boundary - coffset : csize;
@@ -340,14 +417,13 @@ public:
 
         Cache *cache = inode->FindFromCacheList(cindex);
         assert(cache != nullptr);
-        inode->ApollIod(*cache);
         cache->Apply(cdata, coffset - noffset, io_size);
 
         coffset += io_size;
         cdata += io_size;
         csize -= io_size;
       }
-    }
+    }*/
   }
 
 private:
