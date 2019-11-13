@@ -1,17 +1,13 @@
 #pragma once
 
-#include <deque>
 #include <string>
-#include <list>
-#include <vector>
-#include <utility>
 #include <deque>
 #include <atomic>
 #include "misc.h"
 #include "chunkmap.h"
 #include "unvme_wrapper.h"
-#include "cache.h"
 #include "chunklist.h"
+#include "cachelist.h"
 
 class Inode
 {
@@ -105,17 +101,7 @@ public:
   }
   void Release()
   {
-    for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
-    {
-      Cache &cache = (*it).second;
-      if (!cache.IsValid())
-      {
-        continue;
-      }
-      assert(!cache.IsWriteNeeded());
-      cache.Release();
-    }
-    cache_list_.clear();
+    cachelist_.Release();
   }
   ~Inode()
   {
@@ -139,19 +125,7 @@ public:
       Chunkmap::Index cindex = Chunkmap::Index::CreateFromPos(*it * ns_wrapper_.GetBlockSize());
       chunkmap_.Release(cindex);
     }
-    for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
-    {
-      Cache &c = (*it).second;
-      if (!c.IsValid())
-      {
-        continue;
-      }
-      ChunkIndex cindex = (*it).first;
-      if (cindex.GetPos() >= len)
-      {
-        c.ForceRelease();
-      }
-    }
+    cachelist_.Truncate(len);
     return Status::kOk;
   }
   size_t GetLen()
@@ -202,46 +176,11 @@ public:
   }
   Cache *FindFromCacheList(ChunkIndex cindex)
   {
-    auto it = cache_list_.begin();
-    for (; it != cache_list_.end(); ++it)
-    {
-      if ((*it).second.IsValid() && (*it).first == cindex)
-      {
-        break;
-      }
-    }
-    if (it != cache_list_.end())
-    {
-      Cache *cache = &((*it).second);
-      cache->SetTicket(cache_ticket_);
-      cache_ticket_++;
-      return cache;
-    }
-    return nullptr;
+    return cachelist_.FindFromCacheList(cindex);
   }
   void RegisterToCache(const int num, ChunkIndex cindex, void *buf)
   {
-    int i = 0;
-    auto it = cache_list_.begin();
-    for (; it != cache_list_.end() && i < num; ++it)
-    {
-      if (!(*it).second.IsValid())
-      {
-        (*it).first = cindex;
-        (*it).second.Reset(Cache(cache_ticket_, buf));
-        i++;
-        cindex = ChunkIndex::CreateFromIndex(cindex.Get() + 1);
-        buf = (void *)((char *)buf + kChunkSize);
-        cache_ticket_++;
-      }
-    }
-    for (; i < num; i++)
-    {
-      cache_list_.push_back(std::move(std::make_pair(cindex, Cache(cache_ticket_, buf))));
-      cindex = ChunkIndex::CreateFromIndex(cindex.Get() + 1);
-      buf = (void *)((char *)buf + kChunkSize);
-      cache_ticket_++;
-    }
+    cachelist_.RegisterToCache(num, cindex, buf);
   }
   Status PrepareCache(ChunkIndex cindex, bool createnew_ifmissing)
   {
@@ -270,57 +209,25 @@ public:
       iod = ns_wrapper_.Aread(dma->buf, lba, kChunkSize / ns_wrapper_.GetBlockSize());
       ns_wrapper_.Apoll(iod);
     }
-    auto it = cache_list_.begin();
-    for (; it != cache_list_.end(); ++it)
-    {
-      if (!(*it).second.IsValid())
-      {
-        (*it).first = cindex;
-        (*it).second.Reset(Cache(cache_ticket_, dma->buf));
-        break;
-      }
-    }
-    if (it == cache_list_.end())
-    {
-      cache_list_.push_back(std::move(std::make_pair(cindex, Cache(cache_ticket_, dma->buf))));
-    }
+    cachelist_.PrepareCache(cindex, dma->buf);
     ns_wrapper_.Free(dma);
-    cache_ticket_++;
 
     return Status::kOk;
   }
   Status ShrinkCacheListIfNeeded(int keep_num)
   {
-    if (keep_num < 32)
+    std::vector<std::pair<ChunkIndex, Cache>> release_cache_list;
+    cachelist_.ShrinkCacheListIfNeeded(keep_num, release_cache_list);
+    for (auto it = release_cache_list.begin(); it != release_cache_list.end(); ++it)
     {
-      keep_num = 32;
-    }
-    if (cache_ticket_ < keep_num)
-    {
-      return Status::kOk;
-    }
-    uint64_t border_ticket = cache_ticket_ - keep_num;
-    std::vector<std::pair<ChunkIndex, Cache>> tmp_buf;
-    for (int i = 0; i < cache_list_.size(); i++)
-    {
-      Cache &c = cache_list_[i].second;
-      if (c.IsValid() && c.GetTicket() <= border_ticket)
+      AsyncIoContext ctx;
+      if (CacheSync(it->second, it->first, ctx) != Status::kOk)
       {
-        ChunkIndex index = cache_list_[i].first;
-
-        // flush current cache
-        if (c.IsWriteNeeded())
-        {
-          AsyncIoContext ctx;
-          if (CacheSync(c, index, ctx) != Status::kOk)
-          {
-            fprintf(stderr, "VEFS: cache awrite failed\n");
-            return Status::kIoError;
-          }
-          RegisterWaitingContext(ctx);
-        }
-        c.Release();
+        fprintf(stderr, "VEFS: cache awrite failed\n");
+        return Status::kIoError;
       }
+      RegisterWaitingContext(ctx);
+      it->second.Release();
     }
     return Status::kOk;
   }
@@ -370,7 +277,9 @@ public:
   }
   void CacheListSync()
   {
-    for (auto it = cache_list_.begin(); it != cache_list_.end(); ++it)
+    std::vector<std::pair<ChunkIndex, Cache>> sync_cache_list_;
+    cachelist_.CacheListSync(sync_cache_list_);
+    for (auto it = sync_cache_list_.begin(); it != sync_cache_list_.end(); ++it)
     {
       ChunkIndex index = (*it).first;
       Cache &c = (*it).second;
@@ -388,6 +297,7 @@ public:
         }
         RegisterWaitingContext(ctx);
       }
+      c.Release();
     }
   }
   void SyncChunkList()
@@ -508,9 +418,8 @@ private:
   std::atomic<int> io_waiting_queue_lock_;
 
   bool inode_updated_;
+  CacheList cachelist_;
 
-  std::vector<std::pair<ChunkIndex, Cache>> cache_list_;
-  uint64_t cache_ticket_ = 0;
   static size_t AlignUp(size_t len)
   {
     return ((len + 3) / 4) * 4;
