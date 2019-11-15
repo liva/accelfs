@@ -209,15 +209,31 @@ public:
       iod = ns_wrapper_.Aread(dma->buf, lba, kChunkSize / ns_wrapper_.GetBlockSize());
       ns_wrapper_.Apoll(iod);
     }
-    cachelist_.PrepareCache(cindex, dma->buf);
+    std::vector<std::pair<ChunkIndex, Cache>> release_cache_list;
+    std::vector<ChunkIndex> incoming_indexes;
+    incoming_indexes.push_back(cindex);
+    cachelist_.ReserveSlots(incoming_indexes, release_cache_list);
+    for (auto it = release_cache_list.begin(); it != release_cache_list.end(); ++it)
+    {
+      AsyncIoContext ctx;
+      if (CacheSync(it->second, it->first, ctx) != Status::kOk)
+      {
+        fprintf(stderr, "VEFS: cache awrite failed\n");
+        return Status::kIoError;
+      }
+      RegisterWaitingContext(ctx);
+      it->second.Release();
+    }
+    cachelist_.RegisterToCache(1, cindex, dma->buf);
     ns_wrapper_.Free(dma);
 
     return Status::kOk;
   }
-  Status ShrinkCacheListIfNeeded(int keep_num)
+  Status OrganizeCacheList(std::vector<ChunkIndex> incoming_indexes, int keep_num)
   {
     std::vector<std::pair<ChunkIndex, Cache>> release_cache_list;
-    cachelist_.ShrinkCacheListIfNeeded(keep_num, release_cache_list);
+    cachelist_.ReserveSlots(incoming_indexes, release_cache_list);
+    cachelist_.ShrinkIfNeeded(keep_num, release_cache_list);
     for (auto it = release_cache_list.begin(); it != release_cache_list.end(); ++it)
     {
       AsyncIoContext ctx;

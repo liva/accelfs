@@ -241,7 +241,8 @@ public:
       {
         if (csize == 0)
         {
-          inode->ShrinkCacheListIfNeeded(0);
+          std::vector<ChunkIndex> incoming_indexes;
+          inode->OrganizeCacheList(incoming_indexes, 0);
           return Status::kOk;
         }
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -276,7 +277,9 @@ public:
     {
       size = flen - offset;
     }
-    inode->RetrieveContexts();
+    {
+      inode->RetrieveContexts();
+    }
 
     size_t coffset = offset;
     char *cdata = scratch;
@@ -292,6 +295,7 @@ public:
       unvme_iod_t iod;
     };
     std::vector<ReadIoContext> io_list;
+    std::vector<ChunkIndex> incoming_indexes;
     {
       while (csize != 0)
       {
@@ -307,6 +311,8 @@ public:
         Cache *cache = inode->FindFromCacheList(cindex);
         if (cache == nullptr)
         {
+          incoming_indexes.push_back(cindex);
+
           uint64_t lba;
           if (inode->GetLba(cindex.GetPos(), lba) != Inode::Status::kOk)
           {
@@ -362,7 +368,9 @@ public:
       }
     }
 
-    inode->ShrinkCacheListIfNeeded(0);
+    {
+      inode->OrganizeCacheList(incoming_indexes, 0);
+    }
     {
       int dma_index = 0;
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
@@ -372,7 +380,6 @@ public:
           printf("unvme apoll failed\n");
           abort();
         }
-        MEASURE_TIME;
         size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
         int chunknum = static_cast<int>(size / kChunkSize);
         inode->RegisterToCache(chunknum, it->cindex, it->dma->buf);
