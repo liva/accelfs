@@ -1,11 +1,15 @@
 #include <stdint.h>
 #include <assert.h>
-#include <utility>
 
 template <class Key, class Value>
 class SimpleHashCache
 {
 public:
+  struct Container
+  {
+    Key k;
+    Value v;
+  };
   class Iterator
   {
   public:
@@ -21,7 +25,7 @@ public:
     {
       return index_ == 256;
     }
-    std::pair<Key, Value> *operator->()
+    Container *operator->()
     {
       return &cache_->GetFromIndex(index_);
     }
@@ -38,7 +42,7 @@ public:
     }
     static int FindNextIndex(SimpleHashCache *cache, int i)
     {
-      while (i < 256 && !cache->GetFromIndex(i).second.IsValid())
+      while (i < 256 && !cache->GetFromIndex(i).v.IsValid())
       {
         i++;
       }
@@ -47,19 +51,19 @@ public:
     SimpleHashCache *cache_;
     int index_;
   };
-  void Put(Key key, Value value)
+  void Put(Key key, Value &&value)
   {
     assert(value.IsValid());
-    container_[GetIndexFromKey(key)].first = key;
-    Value &v = container_[GetIndexFromKey(key)].second;
+    container_[GetIndexFromKey(key)].k = key;
+    Value &v = container_[GetIndexFromKey(key)].v;
     v.Reset(std::move(value));
   }
   Value *Get(Key key)
   {
-    std::pair<Key, Value> &ele = container_[GetIndexFromKey(key)];
-    if (ele.second.IsValid() && key.Get() == ele.first.Get())
+    Container &ele = container_[GetIndexFromKey(key)];
+    if (ele.v.IsValid() && key.Get() == ele.k.Get())
     {
-      return &ele.second;
+      return &ele.v;
     }
     return nullptr;
   }
@@ -67,13 +71,13 @@ public:
   {
     return key.Get() % 256;
   }
-  std::pair<Key, Value> &GetFromIndex(int i)
+  Container &GetFromIndex(int i)
   {
     return container_[i];
   }
 
 private:
-  std::pair<Key, Value> container_[256];
+  Container container_[256];
 };
 
 #if 0

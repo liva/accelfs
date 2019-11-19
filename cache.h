@@ -74,6 +74,7 @@ public:
         c.is_valid_ = false;
         c.needs_written_ = false;
     }
+    Cache(const Cache &c) = delete;
     Cache(uint64_t ticket, SharedDmaBuffer dma, size_t buf_offset)
     {
         ticket_ = ticket;

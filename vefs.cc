@@ -37,7 +37,7 @@ void DumpTime()
         for (auto it = time_list_.begin(); it != time_list_.end(); ++it)
         {
             TimeInfo *ti = *it;
-            printf("%ld\t%ld\t%ld %s:%d\n", ti->time_, ti->count_, ti->time_ / ti->count_, ti->fname_.c_str(), ti->line_);
+            printf("%'ld\t%'ld\t%'ld %s:%d\n", ti->time_, ti->count_, ti->time_ / ti->count_, ti->fname_.c_str(), ti->line_);
         }
     }
 }

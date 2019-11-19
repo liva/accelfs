@@ -178,9 +178,9 @@ public:
   {
     return cachelist_.FindFromCacheList(cindex);
   }
-  void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer dma)
+  void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma)
   {
-    cachelist_.RegisterToCache(num, cindex, dma);
+    cachelist_.RegisterToCache(num, cindex, std::move(dma));
   }
   Status PrepareCache(ChunkIndex cindex, bool createnew_ifmissing)
   {
@@ -219,7 +219,7 @@ public:
       RegisterWaitingContext(ctx);
       it->second.Release();
     }
-    cachelist_.RegisterToCache(1, cindex, dma);
+    cachelist_.RegisterToCache(1, cindex, std::move(dma));
 
     return Status::kOk;
   }

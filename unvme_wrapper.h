@@ -289,14 +289,27 @@ public:
             wrapper_->Ref();
         }
     }
-    SharedDmaBuffer &operator=(SharedDmaBuffer obj)
+    SharedDmaBuffer &operator=(const SharedDmaBuffer &obj)
     {
         if (wrapper_ != nullptr)
         {
             wrapper_->Unref();
         }
         wrapper_ = obj.wrapper_;
-        wrapper_->Ref();
+        if (wrapper_ != nullptr)
+        {
+            wrapper_->Ref();
+        }
+        return *this;
+    }
+    SharedDmaBuffer &operator=(SharedDmaBuffer &&obj)
+    {
+        if (wrapper_ != nullptr)
+        {
+            wrapper_->Unref();
+        }
+        wrapper_ = obj.wrapper_;
+        obj.wrapper_ = nullptr;
         return *this;
     }
     ~SharedDmaBuffer()

@@ -283,6 +283,7 @@ public:
       size = flen - offset;
     }
     {
+      MEASURE_TIME
       inode->RetrieveContexts();
     }
 
@@ -302,6 +303,7 @@ public:
     std::vector<ReadIoContext> io_list;
     std::vector<ChunkIndex> incoming_indexes;
     {
+      MEASURE_TIME
       while (csize != 0)
       {
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -364,6 +366,7 @@ public:
     }
 
     {
+      MEASURE_TIME
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
       {
         size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
@@ -373,10 +376,11 @@ public:
     }
 
     {
+      MEASURE_TIME
       inode->OrganizeCacheList(incoming_indexes, 0);
     }
     {
-      int dma_index = 0;
+      MEASURE_TIME
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
       {
         if (ns_wrapper_.Apoll(it->iod))
@@ -384,10 +388,15 @@ public:
           printf("unvme apoll failed\n");
           abort();
         }
+      }
+    }
+    {
+      MEASURE_TIME
+      for (auto it = io_list.begin(); it != io_list.end(); ++it)
+      {
         size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
         int chunknum = static_cast<int>(size / kChunkSize);
         memcpy(it->data, (char *)it->dma.GetBuffer() + it->inblock_offset, it->size);
-        MEASURE_TIME;
         inode->RegisterToCache(chunknum, it->cindex, std::move(it->dma));
       }
     }

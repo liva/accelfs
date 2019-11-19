@@ -17,9 +17,9 @@ public:
         for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
              !it.IsEnd(); it = it.Next())
         {
-            Cache &c = it->second;
+            Cache &c = it->v;
             assert(c.IsValid());
-            ChunkIndex cindex = it->first;
+            ChunkIndex cindex = it->k;
             if (cindex.GetPos() >= len)
             {
                 c.ForceRelease();
@@ -32,7 +32,7 @@ public:
         for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
              !it.IsEnd(); it = it.Next())
         {
-            Cache &cache = it->second;
+            Cache &cache = it->v;
             assert(cache.IsValid());
             assert(!cache.IsWriteNeeded());
             cache.Release();
@@ -54,12 +54,12 @@ public:
         return nullptr;
     }
     // element should be released in advance
-    void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer dma)
+    void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma)
     {
         size_t buf_offset = 0;
         for (int i = 0; i < num; i++)
         {
-            container_.Put(cindex, std::move(Cache(cache_ticket_, dma, buf_offset)));
+            container_.Put(cindex, Cache(cache_ticket_, dma, buf_offset));
             cindex = ChunkIndex::CreateFromIndex(cindex.Get() + 1);
             buf_offset += kChunkSize;
             cache_ticket_++;
@@ -70,14 +70,14 @@ public:
     {
         for (auto it = incoming_indexes.begin(); it != incoming_indexes.end(); ++it)
         {
-            std::pair<ChunkIndex, Cache> &pair = container_.GetFromIndex(CacheContainer::GetIndexFromKey(*it));
-            Cache &c = pair.second;
+            CacheContainer::Container &pair = container_.GetFromIndex(CacheContainer::GetIndexFromKey(*it));
+            Cache &c = pair.v;
             if (c.IsValid())
             {
                 // flush current cache
                 if (c.IsWriteNeeded())
                 {
-                    release_cache_list.push_back(std::move(pair));
+                    release_cache_list.push_back(std::move(std::make_pair(pair.k, std::move(pair.v))));
                 }
                 else
                 {
@@ -105,16 +105,16 @@ public:
         for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
              !it.IsEnd(); it = it.Next())
         {
-            Cache &c = it->second;
+            Cache &c = it->v;
             assert(c.IsValid());
             if (c.GetTicket() <= border_ticket)
             {
-                ChunkIndex index = it->first;
+                ChunkIndex index = it->k;
 
                 // flush current cache
                 if (c.IsWriteNeeded())
                 {
-                    release_cache_list.emplace_back(std::move(std::make_pair(it->first, std::move(it->second))));
+                    release_cache_list.push_back(std::move(std::make_pair(it->k, std::move(it->v))));
                 }
                 else
                 {
@@ -130,8 +130,8 @@ public:
         for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
              !it.IsEnd(); it = it.Next())
         {
-            assert(it->second.IsValid());
-            sync_cache_list.push_back(std::move(std::make_pair(it->first, std::move(it->second))));
+            assert(it->v.IsValid());
+            sync_cache_list.push_back(std::move(std::make_pair(it->k, std::move(it->v))));
         }
         assert(CacheContainer::Iterator(container_).IsEnd());
         available_ = 0;
