@@ -2,6 +2,7 @@
 #include <assert.h>
 #include "misc.h"
 #include "unvme.h"
+#include "unvme_wrapper.h"
 
 class ChunkIndex
 {
@@ -65,17 +66,19 @@ public:
         is_valid_ = c.is_valid_;
         if (is_valid_)
         {
-            memcpy(buf_, c.buf_, kChunkSize);
+            dma_ = std::move(c.dma_);
+            buf_offset_ = c.buf_offset_;
         }
         needs_written_ = c.needs_written_;
         ticket_ = c.ticket_;
         c.is_valid_ = false;
         c.needs_written_ = false;
     }
-    Cache(uint64_t ticket, void *buf)
+    Cache(uint64_t ticket, SharedDmaBuffer dma, size_t buf_offset)
     {
         ticket_ = ticket;
-        memcpy(buf_, buf, kChunkSize);
+        dma_ = std::move(dma);
+        buf_offset_ = buf_offset;
         is_valid_ = true;
         needs_written_ = false;
     }
@@ -86,11 +89,15 @@ public:
     }
     void Reset(Cache &&c)
     {
-        assert(!IsValid());
+        if (IsValid() && needs_written_)
+        {
+            abort();
+        }
         is_valid_ = c.is_valid_;
         if (is_valid_)
         {
-            memcpy(buf_, c.buf_, kChunkSize);
+            dma_ = std::move(c.dma_);
+            buf_offset_ = c.buf_offset_;
         }
         needs_written_ = c.needs_written_;
         ticket_ = c.ticket_;
@@ -107,22 +114,23 @@ public:
     }
     void MarkSynced(void *buf)
     {
+        // TODO needs optimization
         assert(needs_written_);
-        memcpy(buf, buf_, kChunkSize);
+        memcpy(buf, GetPtr(), kChunkSize);
         needs_written_ = false;
     }
     // cache <- buf
     void Refresh(const char *buf, size_t offset, size_t n)
     {
         assert(offset + n <= kChunkSize);
-        memcpy(buf_ + offset, buf, n);
+        memcpy(GetPtr() + offset, buf, n);
         needs_written_ = true;
     }
     // buf <- cache
     void Apply(char *buf, size_t offset, size_t n)
     {
         assert(offset + n <= kChunkSize);
-        memcpy(buf, buf_ + offset, n);
+        memcpy(buf, GetPtr() + offset, n);
     }
     void ForceRelease()
     {
@@ -144,7 +152,12 @@ public:
     }
 
 private:
-    char buf_[kChunkSize];
+    char *GetPtr()
+    {
+        return (char *)dma_.GetBuffer() + buf_offset_;
+    }
+    SharedDmaBuffer dma_;
+    size_t buf_offset_;
     bool needs_written_;
     bool is_valid_;
     uint64_t ticket_;

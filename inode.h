@@ -178,9 +178,9 @@ public:
   {
     return cachelist_.FindFromCacheList(cindex);
   }
-  void RegisterToCache(const int num, ChunkIndex cindex, void *buf)
+  void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer dma)
   {
-    cachelist_.RegisterToCache(num, cindex, buf);
+    cachelist_.RegisterToCache(num, cindex, dma);
   }
   Status PrepareCache(ChunkIndex cindex, bool createnew_ifmissing)
   {
@@ -197,16 +197,11 @@ public:
     {
       return Status::kIoError;
     }
-    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
-    if (!dma)
-    {
-      printf("allocation failure\n");
-      exit(1);
-    }
+    SharedDmaBuffer dma(ns_wrapper_, kChunkSize);
     unvme_iod_t iod = nullptr;
     if (!createnew_ifmissing)
     {
-      iod = ns_wrapper_.Aread(dma->buf, lba, kChunkSize / ns_wrapper_.GetBlockSize());
+      iod = ns_wrapper_.Aread(dma.GetBuffer(), lba, kChunkSize / ns_wrapper_.GetBlockSize());
       ns_wrapper_.Apoll(iod);
     }
     std::vector<std::pair<ChunkIndex, Cache>> release_cache_list;
@@ -224,8 +219,7 @@ public:
       RegisterWaitingContext(ctx);
       it->second.Release();
     }
-    cachelist_.RegisterToCache(1, cindex, dma->buf);
-    ns_wrapper_.Free(dma);
+    cachelist_.RegisterToCache(1, cindex, dma);
 
     return Status::kOk;
   }

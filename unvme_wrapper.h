@@ -9,8 +9,6 @@
 #include <unvme.h>
 #include <unvme_nvme.h>
 
-#include <map>
-
 class UnvmeWrapper
 {
 public:
@@ -132,6 +130,7 @@ public:
         }
         return dma;
     }
+    // duplicated
     void AllocChunk(int chunknum, vfio_dma_t **dma_array)
     {
         int i = 0;
@@ -227,4 +226,92 @@ private:
     size_t memleak_count_ = 0;
     std::vector<vfio_dma_t *> chunk_pool_;
     std::atomic<int> alloc_lock_;
+};
+
+class DmaBufferWrapper
+{
+public:
+    DmaBufferWrapper(UnvmeWrapper &ns_wrapper, size_t size) : ns_wrapper_(ns_wrapper), buf_(ns_wrapper_.Alloc(size))
+    {
+        cnt_ = 1;
+        if (!buf_)
+        {
+            printf("allocation failure\n");
+            exit(1);
+        }
+    }
+    vfio_dma_t *GetBuffer()
+    {
+        return buf_;
+    }
+    ~DmaBufferWrapper()
+    {
+        assert(cnt_ == 0);
+        ns_wrapper_.Free(buf_);
+    }
+    void Ref()
+    {
+        cnt_++;
+    }
+    void Unref()
+    {
+        cnt_--;
+        if (cnt_ == 0)
+        {
+            delete this;
+        }
+    }
+
+private:
+    UnvmeWrapper &ns_wrapper_;
+    vfio_dma_t *buf_;
+    int cnt_;
+};
+
+class SharedDmaBuffer
+{
+public:
+    SharedDmaBuffer() : wrapper_(nullptr)
+    {
+    }
+    SharedDmaBuffer(UnvmeWrapper &ns_wrapper, size_t size) : wrapper_(new DmaBufferWrapper(ns_wrapper, size))
+    {
+    }
+    SharedDmaBuffer(SharedDmaBuffer &&obj)
+    {
+        wrapper_ = obj.wrapper_;
+        obj.wrapper_ = nullptr;
+    }
+    SharedDmaBuffer(const SharedDmaBuffer &obj) : wrapper_(obj.wrapper_)
+    {
+        if (wrapper_ != nullptr)
+        {
+            wrapper_->Ref();
+        }
+    }
+    SharedDmaBuffer &operator=(SharedDmaBuffer obj)
+    {
+        if (wrapper_ != nullptr)
+        {
+            wrapper_->Unref();
+        }
+        wrapper_ = obj.wrapper_;
+        wrapper_->Ref();
+        return *this;
+    }
+    ~SharedDmaBuffer()
+    {
+        if (wrapper_ != nullptr)
+        {
+            wrapper_->Unref();
+        }
+    }
+    void *GetBuffer()
+    {
+        assert(wrapper_ != nullptr);
+        return wrapper_->GetBuffer()->buf;
+    }
+
+private:
+    DmaBufferWrapper *wrapper_;
 };

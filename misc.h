@@ -13,8 +13,8 @@ extern bool header_dump_;
 
 extern bool debug_flag; //debug
 
-//#pragma clang optimize off
-//#undef NDEBUG
+#pragma clang optimize off
+#undef NDEBUG
 
 static inline uint64_t ve_gettime()
 {

@@ -255,6 +255,11 @@ public:
 
         Cache *cache = inode->FindFromCacheList(cindex);
         assert(cache != nullptr);
+        if (cache == nullptr)
+        {
+          // should be fixed
+          abort();
+        }
         cache->Refresh(cdata, coffset - noffset, io_size);
 
         coffset += io_size;
@@ -291,7 +296,7 @@ public:
       size_t inblock_offset;
       size_t size;
       char *data;
-      vfio_dma_t *dma;
+      SharedDmaBuffer dma;
       unvme_iod_t iod;
     };
     std::vector<ReadIoContext> io_list;
@@ -336,15 +341,15 @@ public:
           }
           if (new_ioctx)
           {
-            io_list.push_back(ReadIoContext{
+            io_list.push_back(std::move(ReadIoContext{
                 lba,
                 cindex,
                 inblock_offset,
                 io_size,
                 cdata,
+                SharedDmaBuffer(),
                 nullptr,
-                nullptr,
-            });
+            }));
           }
         }
         else
@@ -362,9 +367,8 @@ public:
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
       {
         size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
-        vfio_dma_t *dma = ns_wrapper_.Alloc(size);
-        it->iod = ns_wrapper_.Aread(dma->buf, it->lba, size / ns_wrapper_.GetBlockSize());
-        it->dma = dma;
+        it->dma = SharedDmaBuffer(ns_wrapper_, size);
+        it->iod = ns_wrapper_.Aread(it->dma.GetBuffer(), it->lba, size / ns_wrapper_.GetBlockSize());
       }
     }
 
@@ -382,9 +386,9 @@ public:
         }
         size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
         int chunknum = static_cast<int>(size / kChunkSize);
-        inode->RegisterToCache(chunknum, it->cindex, it->dma->buf);
-        memcpy(it->data, (char *)it->dma->buf + it->inblock_offset, it->size);
-        ns_wrapper_.Free(it->dma);
+        memcpy(it->data, (char *)it->dma.GetBuffer() + it->inblock_offset, it->size);
+        MEASURE_TIME;
+        inode->RegisterToCache(chunknum, it->cindex, std::move(it->dma));
       }
     }
 
