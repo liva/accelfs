@@ -77,7 +77,7 @@ std::deque<Inode::AsyncIoContext> Header::Write()
     size_t extra_chunk = 0;
     while (true)
     {
-        vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+        vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
         if (!dma)
         {
             printf("allocation failure\n");
@@ -149,7 +149,7 @@ bool Header::Read()
 {
     bool error = false;
 
-    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+    vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
     if (!dma)
     {
         printf("allocation failure\n");

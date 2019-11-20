@@ -175,7 +175,7 @@ private:
     }
     void ChunkmapRead()
     {
-        vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+        vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
         if (!dma)
         {
             printf("allocation failure\n");
@@ -198,7 +198,7 @@ private:
             {
                 continue;
             }
-            vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+            vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
             if (!dma)
             {
                 printf("allocation failure\n");

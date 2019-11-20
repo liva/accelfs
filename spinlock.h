@@ -13,6 +13,10 @@ public:
                              : "memory");
         }
     }
+    static bool IsAcquired(std::atomic<int> &lock)
+    {
+        return lock == 1;
+    }
     ~Spinlock()
     {
         lock_ = 0;

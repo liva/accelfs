@@ -12,7 +12,7 @@
 class UnvmeWrapper
 {
 public:
-    UnvmeWrapper() : ns_(unvme_open("b3:00.0")), lock_(0), alloc_lock_(0)
+    UnvmeWrapper() : ns_(unvme_open("b3:00.0")), lock_(0)
     {
         printf("qc=%d/%d qs=%d/%d bc=%#lx bs=%d maxbpio=%d\n", ns_->qcount,
                ns_->maxqcount, ns_->qsize, ns_->maxqsize, ns_->blockcount,
@@ -20,10 +20,6 @@ public:
     }
     ~UnvmeWrapper()
     {
-        for (auto it = chunk_pool_.begin(); it != chunk_pool_.end(); ++it)
-        {
-            unvme_free(ns_, *it);
-        }
         if (memleak_count_ != 0)
         {
             printf("!!!memory leak detected! (%zu bytes)\n", memleak_count_);
@@ -61,7 +57,6 @@ public:
                 return -1;
             }
             {
-                Spinlock lock(lock_);
                 if (unvme_apoll(iod, 0) == 0)
                 {
                     return 0;
@@ -72,7 +67,6 @@ public:
     }
     int ApollWithoutWait(unvme_iod_t iod)
     {
-        Spinlock lock(lock_);
         if (unvme_apoll(iod, 0) == 0)
         {
             return 0;
@@ -86,7 +80,7 @@ public:
     }
     int AreadChunk(u64 lba, vfio_dma_t *&dma, unvme_iod_t &iod)
     {
-        dma = AllocChunk();
+        dma = Alloc(kChunkSize);
         if (!dma)
         {
             printf("allocation failure\n");
@@ -105,133 +99,67 @@ public:
     unvme_iod_t Aread(void *buf, u64 slba, u32 nlb)
     {
         Spinlock lock(lock_);
+        return AreadInternal(buf, slba, nlb);
+    }
+    unvme_iod_t AreadInternal(void *buf, u64 slba, u32 nlb)
+    {
+        assert(Spinlock::IsAcquired(lock_));
         return unvme_aread(ns_, 0, buf, slba, nlb);
     }
     unvme_iod_t Awrite(const void *buf, u64 slba, u32 nlb)
     {
         Spinlock lock(lock_);
+        return AwriteInternal(buf, slba, nlb);
+    }
+    unvme_iod_t AwriteInternal(const void *buf, u64 slba, u32 nlb)
+    {
+        assert(Spinlock::IsAcquired(lock_));
         return unvme_awrite(ns_, 0, buf, slba, nlb);
     }
     vfio_dma_t *Alloc(size_t size)
     {
+        Spinlock lock(lock_);
+        return AllocInternal(size);
+    }
+    vfio_dma_t *AllocInternal(size_t size)
+    {
+        assert(Spinlock::IsAcquired(lock_));
         if (size > 2 * 1024 * 1024)
         {
             printf("unvme dma memory allocation failure.\n");
             abort();
         }
         vfio_dma_t *dma;
-        {
-            Spinlock lock(lock_);
-            dma = unvme_alloc(ns_, size);
-        }
-        {
-            Spinlock lock(alloc_lock_);
-            memleak_count_ += dma->size;
-        }
+        dma = unvme_alloc(ns_, size);
+        memleak_count_ += dma->size;
         return dma;
-    }
-    // duplicated
-    void AllocChunk(int chunknum, vfio_dma_t **dma_array)
-    {
-        int i = 0;
-        {
-            Spinlock lock(alloc_lock_);
-            memleak_count_ += kChunkSize * chunknum;
-            while (!chunk_pool_.empty() && i < chunknum)
-            {
-                auto it = chunk_pool_.end();
-                --it;
-                dma_array[i] = *it;
-                chunk_pool_.pop_back();
-                i++;
-            }
-        }
-        Spinlock lock(lock_);
-        for (; i < chunknum; i++)
-        {
-            dma_array[i] = unvme_alloc(ns_, kChunkSize);
-        }
-    }
-    vfio_dma_t *AllocChunk()
-    {
-        {
-            Spinlock lock(alloc_lock_);
-            memleak_count_ += kChunkSize;
-            if (!chunk_pool_.empty())
-            {
-                auto it = chunk_pool_.end();
-                --it;
-                vfio_dma_t *dma = *it;
-                chunk_pool_.pop_back();
-                return dma;
-            }
-        }
-        {
-            Spinlock lock(lock_);
-            return unvme_alloc(ns_, kChunkSize);
-        }
     }
     int Free(vfio_dma_t *dma)
     {
-        std::vector<vfio_dma_t *> free_dma;
-        {
-            Spinlock lock(alloc_lock_);
-            memleak_count_ -= dma->size;
-            if (dma->size == kChunkSize)
-            {
-                chunk_pool_.push_back(dma);
-            }
-            else
-            {
-                Spinlock lock(lock_);
-                return unvme_free(ns_, dma);
-            }
-            if (chunk_pool_.size() > 64)
-            {
-                for (int i = 0; i < chunk_pool_.size() - 32; i++)
-                {
-                    auto it = chunk_pool_.end();
-                    --it;
-                    free_dma.push_back(*it);
-                    chunk_pool_.pop_back();
-                }
-            }
-        }
-        if (!free_dma.empty())
-        {
-            Spinlock lock(lock_);
-            for (auto it = free_dma.begin(); it != free_dma.end(); ++it)
-            {
-                unvme_free(ns_, *it);
-            }
-        }
-        return 0;
+        Spinlock lock(lock_);
+        return FreeInternal(dma);
+    }
+    int FreeInternal(vfio_dma_t *dma)
+    {
+        assert(Spinlock::IsAcquired(lock_));
+        memleak_count_ -= dma->size;
+        return unvme_free(ns_, dma);
+    }
+    std::atomic<int> &GetLockFlag()
+    {
+        return lock_;
     }
 
 private:
-    void Lock()
-    {
-        while (lock_.fetch_or(1) == 1)
-        {
-            asm volatile("" ::
-                             : "memory");
-        }
-    }
-    void Unlock()
-    {
-        lock_ = 0;
-    }
     const unvme_ns_t *ns_;
     std::atomic<int> lock_;
     size_t memleak_count_ = 0;
-    std::vector<vfio_dma_t *> chunk_pool_;
-    std::atomic<int> alloc_lock_;
 };
 
 class DmaBufferWrapper
 {
 public:
-    DmaBufferWrapper(UnvmeWrapper &ns_wrapper, size_t size) : ns_wrapper_(ns_wrapper), buf_(ns_wrapper_.Alloc(size))
+    DmaBufferWrapper(UnvmeWrapper &ns_wrapper, size_t size) : ns_wrapper_(ns_wrapper), buf_(ns_wrapper_.AllocInternal(size))
     {
         cnt_ = 1;
         if (!buf_)

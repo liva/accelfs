@@ -197,7 +197,11 @@ public:
     {
       return Status::kIoError;
     }
-    SharedDmaBuffer dma(ns_wrapper_, kChunkSize);
+    SharedDmaBuffer dma;
+    {
+      Spinlock lock(ns_wrapper_.GetLockFlag());
+      dma = SharedDmaBuffer(ns_wrapper_, kChunkSize);
+    }
     unvme_iod_t iod = nullptr;
     if (!createnew_ifmissing)
     {
@@ -316,7 +320,7 @@ public:
     {
       while (true)
       {
-        vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+        vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
         if (!dma)
         {
           printf("allocation failure\n");
@@ -396,7 +400,7 @@ private:
   }
   Status CacheSync(Cache &cache, ChunkIndex index, Inode::AsyncIoContext &ctx)
   {
-    vfio_dma_t *dma = ns_wrapper_.AllocChunk();
+    vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
     cache.MarkSynced(dma->buf);
     u64 lba;
     if (GetLba(index.GetPos(), lba) != Status::kOk)
