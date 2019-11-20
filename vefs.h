@@ -283,7 +283,6 @@ public:
       size = flen - offset;
     }
     {
-      MEASURE_TIME;
       inode->RetrieveContexts();
     }
 
@@ -303,7 +302,7 @@ public:
     std::vector<ReadIoContext> io_list;
     std::vector<ChunkIndex> incoming_indexes;
     {
-      MEASURE_TIME;
+      incoming_indexes.reserve(size / kChunkSize + 1);
       while (csize != 0)
       {
         size_t boundary = inode->GetNextChunkBoundary(coffset);
@@ -326,7 +325,7 @@ public:
             return Status::kIoError;
           }
           bool new_ioctx = true;
-          /*if (!io_list.empty())
+          if (!io_list.empty())
           {
             ReadIoContext &ctx = io_list.back();
             size_t pctx_iosize = ctx.inblock_offset + ctx.size;
@@ -340,7 +339,7 @@ public:
 
               new_ioctx = false;
             }
-          }*/
+          }
           if (new_ioctx)
           {
             io_list.push_back(std::move(ReadIoContext{
@@ -368,29 +367,18 @@ public:
     {
       Spinlock lock(ns_wrapper_.GetLockFlag());
       {
-        MEASURE_TIME;
         for (auto it = io_list.begin(); it != io_list.end(); ++it)
         {
           size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
           it->dma = SharedDmaBuffer(ns_wrapper_, size);
-        }
-      }
-
-      {
-        MEASURE_TIME;
-        for (auto it = io_list.begin(); it != io_list.end(); ++it)
-        {
-          size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
           it->iod = ns_wrapper_.AreadInternal(it->dma.GetBuffer(), it->lba, size / ns_wrapper_.GetBlockSize());
         }
       }
     }
     {
-      MEASURE_TIME;
       inode->OrganizeCacheList(incoming_indexes, 0);
     }
     {
-      MEASURE_TIME;
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
       {
         if (ns_wrapper_.Apoll(it->iod))
@@ -401,7 +389,6 @@ public:
       }
     }
     {
-      MEASURE_TIME;
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
       {
         size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
