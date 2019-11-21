@@ -57,6 +57,7 @@ public:
                 return -1;
             }
             {
+                Spinlock lock(lock_);
                 if (unvme_apoll(iod, 0) == 0)
                 {
                     return 0;
@@ -67,6 +68,7 @@ public:
     }
     int ApollWithoutWait(unvme_iod_t iod)
     {
+        Spinlock lock(lock_);
         if (unvme_apoll(iod, 0) == 0)
         {
             return 0;
