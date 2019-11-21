@@ -275,9 +275,7 @@ public:
           {
             ReadIoContext &ctx = io_list.back();
             size_t pctx_iosize = ctx.inblock_offset + ctx.size;
-            if (ChunkIndex::CreateFromPos(ctx.cindex.GetPos() + pctx_iosize) == cindex &&
-                ctx.lba + pctx_iosize / ns_wrapper_.GetBlockSize() == lba &&
-                pctx_iosize + io_size <= 2 * 1024 * 1024)
+            if (IsAbleToConcatIoBlock(ctx.cindex, cindex, pctx_iosize, io_size, ctx.lba, lba))
             {
               assert((pctx_iosize % kChunkSize) == 0);
               assert(inblock_offset == 0);
@@ -662,6 +660,12 @@ private:
     int fd = open(fname.c_str(), O_RDWR | O_CREAT);
     pwrite(fd, data, size, offset);
     close(fd);
+  }
+  bool IsAbleToConcatIoBlock(ChunkIndex prev_cindex, ChunkIndex cur_cindex, size_t prev_iosize, size_t cur_iosize, uint64_t prev_lba, uint64_t cur_lba)
+  {
+    return ChunkIndex::CreateFromPos(prev_cindex.GetPos() + prev_iosize) == cur_cindex &&
+           prev_lba + prev_iosize / ns_wrapper_.GetBlockSize() == cur_lba &&
+           prev_iosize + cur_io_size <= 2 * 1024 * 1024;
   }
   template <class T>
   T AlignChunk(T val)
