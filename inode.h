@@ -135,10 +135,7 @@ public:
     vefs_printf("w[%s %lu %lu]\n", GetFname().c_str(), offset, size);
     if (redirect_)
     {
-      std::string fname = GetFname();
-      int fd = open(fname.c_str(), O_RDWR | O_CREAT);
-      pwrite(fd, data, size, offset);
-      close(fd);
+      RedirectWrite(offset, data, size);
     }
     const char *data_ = (const char *)data;
     RetrieveContexts();
@@ -146,7 +143,7 @@ public:
     size_t end = offset + size;
     if (end > oldsize)
     {
-      if (Truncate(end) != Inode::Status::kOk)
+      if (Truncate(end) != Status::kOk)
       {
         return Status::kIoError;
       }
@@ -171,7 +168,7 @@ public:
         ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
         bool createnew_ifmissing = (coffset == noffset && io_size == kChunkSize) || (oldsize <= noffset);
-        if (PrepareCache(cindex, createnew_ifmissing) != Inode::Status::kOk)
+        if (PrepareCache(cindex, createnew_ifmissing) != Status::kOk)
         {
           return Status::kIoError;
         }
@@ -269,7 +266,7 @@ public:
           incoming_indexes.push_back(cindex);
 
           uint64_t lba;
-          if (GetLba(cindex.GetPos(), lba) != Inode::Status::kOk)
+          if (GetLba(cindex.GetPos(), lba) != Status::kOk)
           {
             return Status::kIoError;
           }
@@ -657,6 +654,13 @@ private:
       exit(1);
     }
     free(buf);
+    close(fd);
+  }
+  void RedirectWrite(size_t offset, const void *data, size_t size)
+  {
+    std::string fname = GetFname();
+    int fd = open(fname.c_str(), O_RDWR | O_CREAT);
+    pwrite(fd, data, size, offset);
     close(fd);
   }
   template <class T>
