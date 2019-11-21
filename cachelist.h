@@ -8,6 +8,7 @@
 class CacheList
 {
 public:
+    using Vector = std::vector<std::pair<ChunkIndex, Cache>>;
     ~CacheList()
     {
         assert(available_ == 0);
@@ -54,19 +55,35 @@ public:
         return nullptr;
     }
     // element should be released in advance
-    void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma)
+    void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma, Vector &release_cache_list)
     {
         size_t buf_offset = 0;
         for (int i = 0; i < num; i++)
         {
-            container_.Put(cindex, Cache(cache_ticket_, dma, buf_offset));
+            CacheContainer::Container old;
+            container_.Put(CacheContainer::Container{cindex, Cache(cache_ticket_, dma, buf_offset)}, old);
+            if (old.v.IsValid())
+            {
+                // flush current cache
+                if (old.v.IsWriteNeeded())
+                {
+                    release_cache_list.push_back(std::move(std::make_pair(old.k, std::move(old.v))));
+                }
+                else
+                {
+                    old.v.Release();
+                }
+            }
+            else
+            {
+                available_++;
+            }
             cindex = ChunkIndex::CreateFromIndex(cindex.Get() + 1);
             buf_offset += kChunkSize;
             cache_ticket_++;
         }
-        available_ += num;
     }
-    void ReserveSlots(std::vector<ChunkIndex> incoming_indexes, std::vector<std::pair<ChunkIndex, Cache>> &release_cache_list)
+    void ReserveSlots(std::vector<ChunkIndex> incoming_indexes, Vector &release_cache_list)
     {
         for (auto it = incoming_indexes.begin(); it != incoming_indexes.end(); ++it)
         {
@@ -87,7 +104,7 @@ public:
             }
         }
     }
-    void ShrinkIfNeeded(int keep_num, std::vector<std::pair<ChunkIndex, Cache>> &release_cache_list)
+    void ShrinkIfNeeded(int keep_num, Vector &release_cache_list)
     {
         if (keep_num < 32)
         {
@@ -125,7 +142,7 @@ public:
         }
     }
 
-    void CacheListSync(std::vector<std::pair<ChunkIndex, Cache>> &sync_cache_list)
+    void CacheListSync(Vector &sync_cache_list)
     {
         for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
              !it.IsEnd(); it = it.Next())

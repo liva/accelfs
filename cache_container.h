@@ -51,12 +51,16 @@ public:
     SimpleHashCache *cache_;
     int index_;
   };
-  void Put(Key key, Value &&value)
+  void Put(Container &&obj, Container &old)
   {
-    assert(value.IsValid());
-    container_[GetIndexFromKey(key)].k = key;
-    Value &v = container_[GetIndexFromKey(key)].v;
-    v.Reset(std::move(value));
+    Container &c = container_[GetIndexFromKey(obj.k)];
+    if (c.v.IsValid())
+    {
+      old.k = c.k;
+      old.v.Reset(std::move(c.v));
+    }
+    c.k = obj.k;
+    c.v.Reset(std::move(obj.v));
   }
   Value *Get(Key key)
   {

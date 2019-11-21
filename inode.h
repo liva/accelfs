@@ -199,7 +199,7 @@ public:
         assert(ndsize == kChunkSize);
         ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
-        Cache *cache = FindFromCacheList(cindex);
+        Cache *cache = cachelist_.FindFromCacheList(cindex);
         assert(cache != nullptr);
         if (cache == nullptr)
         {
@@ -260,7 +260,7 @@ public:
         assert(ndsize == kChunkSize);
         ChunkIndex cindex = ChunkIndex::CreateFromPos(noffset);
 
-        Cache *cache = FindFromCacheList(cindex);
+        Cache *cache = cachelist_.FindFromCacheList(cindex);
         if (cache == nullptr)
         {
           incoming_indexes.push_back(cindex);
@@ -333,13 +333,15 @@ public:
       }
     }
     {
+      CacheList::Vector release_cache_list;
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
       {
         size_t size = alignup(it->inblock_offset + it->size, kChunkSize);
         int chunknum = static_cast<int>(size / kChunkSize);
         memcpy(it->data, (char *)it->dma.GetBuffer() + it->inblock_offset, it->size);
-        RegisterToCache(chunknum, it->cindex, std::move(it->dma));
+        cachelist_.RegisterToCache(chunknum, it->cindex, std::move(it->dma), release_cache_list);
       }
+      ReleaseCacheList(release_cache_list);
     }
 
     vefs_printf("r[%s %lu %lu]\n", GetFname().c_str(), offset, size);
@@ -395,17 +397,9 @@ public:
 
     inode_updated_ = false;
   }
-  Cache *FindFromCacheList(ChunkIndex cindex)
-  {
-    return cachelist_.FindFromCacheList(cindex);
-  }
-  void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma)
-  {
-    cachelist_.RegisterToCache(num, cindex, std::move(dma));
-  }
   Status PrepareCache(ChunkIndex cindex, bool createnew_ifmissing)
   {
-    Cache *c = FindFromCacheList(cindex);
+    Cache *c = cachelist_.FindFromCacheList(cindex);
     if (c)
     {
       return Status::kOk;
@@ -429,40 +423,42 @@ public:
       iod = ns_wrapper_.Aread(dma.GetBuffer(), lba, kChunkSize / ns_wrapper_.GetBlockSize());
       ns_wrapper_.Apoll(iod);
     }
-    std::vector<std::pair<ChunkIndex, Cache>> release_cache_list;
+    CacheList::Vector release_cache_list;
     std::vector<ChunkIndex> incoming_indexes;
     incoming_indexes.push_back(cindex);
-    cachelist_.ReserveSlots(incoming_indexes, release_cache_list);
-    for (auto it = release_cache_list.begin(); it != release_cache_list.end(); ++it)
-    {
-      AsyncIoContext ctx;
-      if (CacheSync(it->second, it->first, ctx) != Status::kOk)
-      {
-        fprintf(stderr, "VEFS: cache awrite failed\n");
-        return Status::kIoError;
-      }
-      RegisterWaitingContext(ctx);
-      it->second.Release();
-    }
-    cachelist_.RegisterToCache(1, cindex, std::move(dma));
+    cachelist_.RegisterToCache(1, cindex, std::move(dma), release_cache_list);
+    ReleaseCacheList(release_cache_list);
 
     return Status::kOk;
   }
   Status OrganizeCacheList(std::vector<ChunkIndex> incoming_indexes, int keep_num)
   {
-    std::vector<std::pair<ChunkIndex, Cache>> release_cache_list;
+    CacheList::Vector release_cache_list;
     cachelist_.ReserveSlots(incoming_indexes, release_cache_list);
     cachelist_.ShrinkIfNeeded(keep_num, release_cache_list);
-    for (auto it = release_cache_list.begin(); it != release_cache_list.end(); ++it)
+    return ReleaseCacheList(release_cache_list);
+  }
+  Status ReleaseCacheList(CacheList::Vector &cache_list)
+  {
+    for (auto it = cache_list.begin(); it != cache_list.end(); ++it)
     {
-      AsyncIoContext ctx;
-      if (CacheSync(it->second, it->first, ctx) != Status::kOk)
+      ChunkIndex index = (*it).first;
+      Cache &c = (*it).second;
+      if (!c.IsValid())
       {
-        fprintf(stderr, "VEFS: cache awrite failed\n");
-        return Status::kIoError;
+        continue;
       }
-      RegisterWaitingContext(ctx);
-      it->second.Release();
+      if (c.IsWriteNeeded())
+      {
+        AsyncIoContext ctx;
+        if (CacheSync(c, index, ctx) != Status::kOk)
+        {
+          fprintf(stderr, "VEFS: cache awrite failed\n");
+          return Status::kIoError;
+        }
+        RegisterWaitingContext(ctx);
+      }
+      c.Release();
     }
     return Status::kOk;
   }
@@ -512,28 +508,9 @@ public:
   }
   void CacheListSync()
   {
-    std::vector<std::pair<ChunkIndex, Cache>> sync_cache_list_;
-    cachelist_.CacheListSync(sync_cache_list_);
-    for (auto it = sync_cache_list_.begin(); it != sync_cache_list_.end(); ++it)
-    {
-      ChunkIndex index = (*it).first;
-      Cache &c = (*it).second;
-      if (!c.IsValid())
-      {
-        continue;
-      }
-      if (c.IsWriteNeeded())
-      {
-        AsyncIoContext ctx;
-        if (CacheSync(c, index, ctx) != Status::kOk)
-        {
-          printf("failed to sync cache");
-          exit(1);
-        }
-        RegisterWaitingContext(ctx);
-      }
-      c.Release();
-    }
+    CacheList::Vector sync_cache_list;
+    cachelist_.CacheListSync(sync_cache_list);
+    ReleaseCacheList(sync_cache_list);
   }
   void SyncChunkList()
   {
@@ -665,7 +642,7 @@ private:
   {
     return ChunkIndex::CreateFromPos(prev_cindex.GetPos() + prev_iosize) == cur_cindex &&
            prev_lba + prev_iosize / ns_wrapper_.GetBlockSize() == cur_lba &&
-           prev_iosize + cur_io_size <= 2 * 1024 * 1024;
+           prev_iosize + cur_iosize <= 2 * 1024 * 1024;
   }
   template <class T>
   T AlignChunk(T val)
