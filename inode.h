@@ -503,7 +503,6 @@ public:
   {
     while (true)
     {
-      Spinlock lock(io_waiting_queue_lock_);
       if (io_waiting_queue_.empty())
       {
         return;
@@ -526,7 +525,6 @@ public:
   {
     std::deque<Inode::AsyncIoContext> queue;
     {
-      Spinlock lock(io_waiting_queue_lock_);
       queue = io_waiting_queue_;
       io_waiting_queue_.clear();
     }
@@ -601,7 +599,6 @@ public:
   }
   void RegisterWaitingContext(AsyncIoContext ctx)
   {
-    Spinlock lock(io_waiting_queue_lock_);
     io_waiting_queue_.push_back(ctx);
   }
   void Delete()
@@ -627,7 +624,7 @@ public:
   }
 
 private:
-  Inode(std::string fname, ChunkList *cl, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper) : lock_(0), chunkmap_(chunkmap), ns_wrapper_(ns_wrapper), io_waiting_queue_lock_(0)
+  Inode(std::string fname, ChunkList *cl, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper) : lock_(0), chunkmap_(chunkmap), ns_wrapper_(ns_wrapper)
   {
     fname_ = fname;
     cl_ = cl;
@@ -703,8 +700,6 @@ private:
 
   Chunkmap &chunkmap_;
   UnvmeWrapper &ns_wrapper_;
-  std::deque<AsyncIoContext> io_waiting_queue_;
-  std::atomic<int> io_waiting_queue_lock_;
 
   bool inode_updated_;
   CacheList cachelist_;
