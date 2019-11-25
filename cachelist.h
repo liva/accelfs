@@ -70,6 +70,7 @@ public:
     // element should be released in advance
     void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma, bool needs_written, Vector &release_cache_list)
     {
+        MEASURE_TIME;
         size_t buf_offset = 0;
         for (int i = 0; i < num; i++)
         {

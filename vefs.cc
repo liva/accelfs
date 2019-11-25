@@ -77,13 +77,8 @@ std::deque<Inode::AsyncIoContext> Header::Write()
     size_t extra_chunk = 0;
     while (true)
     {
-        vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
-        if (!dma)
-        {
-            printf("allocation failure\n");
-            exit(1);
-        }
-        size_t output_size = content_buf.Output(reinterpret_cast<char *>(dma->buf) + info_size, kChunkSize - info_size);
+        SharedDmaBuffer dma(ns_wrapper_, kChunkSize);
+        size_t output_size = content_buf.Output(reinterpret_cast<char *>(dma.GetBuffer()) + info_size, kChunkSize - info_size);
         bool output_completed = (output_size != kChunkSize - info_size);
 
         HeaderBuffer buf;
@@ -107,9 +102,9 @@ std::deque<Inode::AsyncIoContext> Header::Write()
         }
         buf.Append(next_header);
         buf.ResetPos();
-        buf.Output(dma->buf, kChunkSize);
+        buf.Output(dma.GetBuffer(), kChunkSize);
 
-        unvme_iod_t iod = ns_wrapper_.Awrite(dma->buf, GetBlockNumFromSize(hchunk_pos),
+        unvme_iod_t iod = ns_wrapper_.Awrite(dma.GetBuffer(), GetBlockNumFromSize(hchunk_pos),
                                              GetBlockNumFromSize(kChunkSize));
         if (!iod)
         {
@@ -118,7 +113,7 @@ std::deque<Inode::AsyncIoContext> Header::Write()
         }
         ctxs.push_back(Inode::AsyncIoContext{
             .iod = iod,
-            .dma = dma,
+            .dma = std::move(dma),
             .time = ve_gettime(),
         });
         if (output_completed)

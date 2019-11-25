@@ -113,11 +113,11 @@ public:
     {
         return IsValid() && needs_written_;
     }
-    void MarkSynced(void *buf)
+    void MarkSynced(SharedDmaBuffer &dma, size_t &buf_offset)
     {
-        // TODO needs optimization
         assert(needs_written_);
-        memcpy(buf, GetPtr(), kChunkSize);
+        dma = dma_;
+        buf_offset = buf_offset_;
         needs_written_ = false;
     }
     // cache <- buf

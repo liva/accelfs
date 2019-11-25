@@ -21,7 +21,7 @@ public:
   struct AsyncIoContext
   {
     unvme_iod_t iod;
-    vfio_dma_t *dma;
+    SharedDmaBuffer dma;
     uint64_t time;
   };
   Inode(const Inode &) = delete;
@@ -137,11 +137,15 @@ public:
     {
       RedirectWrite(offset, data, size);
     }
-    RetrieveContexts();
+    {
+      MEASURE_TIME;
+      RetrieveContexts();
+    }
     size_t oldsize = GetLen();
     size_t end = offset + size;
     if (end > oldsize)
     {
+      MEASURE_TIME;
       if (Truncate(end) != Status::kOk)
       {
         return Status::kIoError;
@@ -160,16 +164,20 @@ public:
     std::vector<DmaContext> dma_list;
     dma_list.reserve(dma_ctx_num);
 
-    for (size_t coffset = aoffset; coffset < AlignChunkUp(end); coffset += 2 * 1024 * 1024)
     {
-      size_t size = 2 * 1024 * 1024;
-      if (coffset + size > AlignChunkUp(end))
+      MEASURE_TIME;
+      Spinlock lock(ns_wrapper_.GetLockFlag());
+      for (size_t coffset = aoffset; coffset < AlignChunkUp(end); coffset += 2 * 1024 * 1024)
       {
-        size = AlignChunkUp(end) - coffset;
+        size_t size = 2 * 1024 * 1024;
+        if (coffset + size > AlignChunkUp(end))
+        {
+          size = AlignChunkUp(end) - coffset;
+        }
+        dma_list.push_back(DmaContext{
+            ChunkIndex::CreateFromPos(coffset),
+            SharedDmaBuffer(ns_wrapper_, size)});
       }
-      dma_list.push_back(DmaContext{
-          ChunkIndex::CreateFromPos(coffset),
-          SharedDmaBuffer(ns_wrapper_, size)});
     }
 
     struct IoContext
@@ -472,11 +480,12 @@ public:
   {
     CacheList::Vector release_cache_list;
     cachelist_.ReserveSlots(incoming_indexes, release_cache_list);
-    cachelist_.ShrinkIfNeeded(keep_num, release_cache_list);
+    //cachelist_.ShrinkIfNeeded(keep_num, release_cache_list);
     return ReleaseCacheList(release_cache_list);
   }
   Status ReleaseCacheList(CacheList::Vector &cache_list)
   {
+    Spinlock lock(ns_wrapper_.GetLockFlag());
     for (auto it = cache_list.begin(); it != cache_list.end(); ++it)
     {
       ChunkIndex index = (*it).first;
@@ -493,7 +502,7 @@ public:
           fprintf(stderr, "VEFS: cache awrite failed\n");
           return Status::kIoError;
         }
-        RegisterWaitingContext(ctx);
+        RegisterWaitingContext(std::move(ctx));
       }
       c.Release();
     }
@@ -515,31 +524,19 @@ public:
       }
       ctx = *it;
       io_waiting_queue_.pop_front();
-      if (ctx.dma)
-      {
-        ns_wrapper_.Free(ctx.dma);
-      }
     }
   }
   void WaitIoCompletion()
   {
-    std::deque<Inode::AsyncIoContext> queue;
-    {
-      queue = io_waiting_queue_;
-      io_waiting_queue_.clear();
-    }
-    for (auto it = queue.begin(); it != queue.end(); ++it)
+    for (auto it = io_waiting_queue_.begin(); it != io_waiting_queue_.end(); ++it)
     {
       if (ns_wrapper_.Apoll((*it).iod))
       {
         printf("failed to unvme_write");
         abort();
       }
-      if ((*it).dma)
-      {
-        ns_wrapper_.Free((*it).dma);
-      }
     }
+    io_waiting_queue_.clear();
   }
   void CacheListSync()
   {
@@ -553,15 +550,10 @@ public:
     {
       while (true)
       {
-        vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
-        if (!dma)
-        {
-          printf("allocation failure\n");
-          exit(1);
-        }
+        SharedDmaBuffer dma(ns_wrapper_, kChunkSize);
         uint64_t lba;
-        bool needs_additional_write = ChunkListWrite(dma->buf, lba);
-        unvme_iod_t iod = ns_wrapper_.Awrite(dma->buf, lba,
+        bool needs_additional_write = ChunkListWrite(dma.GetBuffer(), lba);
+        unvme_iod_t iod = ns_wrapper_.Awrite(dma.GetBuffer(), lba,
                                              kChunkSize / ns_wrapper_.GetBlockSize());
         if (!iod)
         {
@@ -570,7 +562,7 @@ public:
         }
         RegisterWaitingContext(AsyncIoContext{
             .iod = iod,
-            .dma = dma,
+            .dma = std::move(dma),
             .time = ve_gettime(),
         });
         if (!needs_additional_write)
@@ -597,9 +589,9 @@ public:
   {
     return cl_->Write(buf, lba);
   }
-  void RegisterWaitingContext(AsyncIoContext ctx)
+  void RegisterWaitingContext(AsyncIoContext &&ctx)
   {
-    io_waiting_queue_.push_back(ctx);
+    io_waiting_queue_.push_back(std::move(ctx));
   }
   void Delete()
   {
@@ -632,15 +624,15 @@ private:
   }
   Status CacheSync(Cache &cache, ChunkIndex index, Inode::AsyncIoContext &ctx)
   {
-    vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
-    MEASURE_TIME;
-    cache.MarkSynced(dma->buf);
+    SharedDmaBuffer dma;
+    size_t buf_offset;
+    cache.MarkSynced(dma, buf_offset);
     u64 lba;
     if (GetLba(index.GetPos(), lba) != Status::kOk)
     {
       return Status::kIoError;
     }
-    unvme_iod_t iod = ns_wrapper_.Awrite(dma->buf, lba, kChunkSize / ns_wrapper_.GetBlockSize());
+    unvme_iod_t iod = ns_wrapper_.AwriteInternal((void *)((char *)dma.GetBuffer() + buf_offset), lba, kChunkSize / ns_wrapper_.GetBlockSize());
     if (!iod)
     {
       fprintf(stderr, "VEFS: cache awrite failed\n");
@@ -648,7 +640,7 @@ private:
     }
     ctx = Inode::AsyncIoContext{
         .iod = iod,
-        .dma = dma,
+        .dma = std::move(dma),
         .time = ve_gettime(),
     };
     return Status::kOk;
@@ -703,6 +695,8 @@ private:
 
   bool inode_updated_;
   CacheList cachelist_;
+
+  std::deque<AsyncIoContext> io_waiting_queue_;
 
   static size_t AlignUp(size_t len)
   {

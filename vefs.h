@@ -48,9 +48,13 @@ public:
     }
     return vefs_.get();
   }
-  static void Reset()
+  static void Exit()
   {
     vefs_.reset(nullptr);
+  }
+  static void Reset()
+  {
+    vefs_->Exit();
     vefs_.reset(new Vefs);
   }
 
@@ -84,9 +88,14 @@ public:
 
   void Sync(Inode *inode)
   {
+    SoftSync(inode);
+
+    HardWrite();
+  }
+  void SoftSync(Inode *inode)
+  {
     MEASURE_TIME;
     bool inode_updated_flag;
-    std::vector<Inode::AsyncIoContext> ctxs;
     {
       Spinlock lock(inode->GetLock());
       inode_updated_flag = inode->IsUpdated();
@@ -101,12 +110,11 @@ public:
       Spinlock lock(inode->GetLock());
       inode->WaitIoCompletion();
     }
-
-    HardWrite();
   }
 
   void HardWrite()
   {
+    MEASURE_TIME;
     ns_wrapper_.HardWrite();
   }
 

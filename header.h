@@ -87,7 +87,6 @@ public:
                 printf("failed to unvme_write");
                 abort();
             }
-            ns_wrapper_.Free((*it).dma);
         }
     }
     bool DoesExist(const std::string &fname)
@@ -198,14 +197,9 @@ private:
             {
                 continue;
             }
-            vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
-            if (!dma)
-            {
-                printf("allocation failure\n");
-                exit(1);
-            }
-            chunkmap_.Write(offset, dma->buf);
-            unvme_iod_t iod = ns_wrapper_.Awrite(dma->buf, GetBlockNumFromSize(kChunkmapStartPos + offset),
+            SharedDmaBuffer dma(ns_wrapper_, kChunkSize);
+            chunkmap_.Write(offset, dma.GetBuffer());
+            unvme_iod_t iod = ns_wrapper_.Awrite(dma.GetBuffer(), GetBlockNumFromSize(kChunkmapStartPos + offset),
                                                  GetBlockNumFromSize(kChunkSize));
             if (!iod)
             {
@@ -214,7 +208,7 @@ private:
             }
             ctxs.push_back(Inode::AsyncIoContext{
                 .iod = iod,
-                .dma = dma,
+                .dma = std::move(dma),
                 .time = ve_gettime(),
             });
         }
