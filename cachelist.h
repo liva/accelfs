@@ -39,29 +39,42 @@ public:
             cache.Release();
             available_--;
         }
-        assert(available_ == 0);
         assert(CacheContainer::Iterator(container_).IsEnd());
+        assert(available_ == 0);
     }
 
-    Cache *FindFromCacheList(ChunkIndex cindex)
+    bool CheckIfExistAndIncCnt(ChunkIndex cindex)
     {
         Cache *c = container_.Get(cindex);
         if (c != nullptr)
         {
             c->SetTicket(cache_ticket_);
             cache_ticket_++;
-            return c;
+            return true;
         }
-        return nullptr;
+        return false;
+    }
+    void Apply(ChunkIndex cindex, char *buf, size_t offset, size_t n)
+    {
+        Cache *c = container_.Get(cindex);
+        assert(c != nullptr);
+        c->Apply(buf, offset, n);
+    }
+    void ForceRelease(ChunkIndex cindex)
+    {
+        Cache *c = container_.Get(cindex);
+        assert(c != nullptr);
+        c->ForceRelease();
+        available_--;
     }
     // element should be released in advance
-    void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma, Vector &release_cache_list)
+    void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma, bool needs_written, Vector &release_cache_list)
     {
         size_t buf_offset = 0;
         for (int i = 0; i < num; i++)
         {
             CacheContainer::Container old;
-            container_.Put(CacheContainer::Container{cindex, Cache(cache_ticket_, dma, buf_offset)}, old);
+            container_.Put(CacheContainer::Container{cindex, Cache(cache_ticket_, dma, buf_offset, needs_written)}, old);
             if (old.v.IsValid())
             {
                 // flush current cache
@@ -149,9 +162,10 @@ public:
         {
             assert(it->v.IsValid());
             sync_cache_list.push_back(std::move(std::make_pair(it->k, std::move(it->v))));
+            available_--;
         }
+        assert(available_ == 0);
         assert(CacheContainer::Iterator(container_).IsEnd());
-        available_ = 0;
     }
 
 private:

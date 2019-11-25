@@ -161,7 +161,7 @@ private:
 class DmaBufferWrapper
 {
 public:
-    DmaBufferWrapper(UnvmeWrapper &ns_wrapper, size_t size) : ns_wrapper_(ns_wrapper), buf_(ns_wrapper_.AllocInternal(size))
+    DmaBufferWrapper(UnvmeWrapper &ns_wrapper, size_t size) : ns_wrapper_(ns_wrapper), buf_(ns_wrapper_.AllocInternal(size)), size_(size)
     {
         cnt_ = 1;
         if (!buf_)
@@ -173,6 +173,10 @@ public:
     vfio_dma_t *GetBuffer()
     {
         return buf_;
+    }
+    size_t GetSize()
+    {
+        return size_;
     }
     ~DmaBufferWrapper()
     {
@@ -195,6 +199,7 @@ public:
 private:
     UnvmeWrapper &ns_wrapper_;
     vfio_dma_t *buf_;
+    size_t size_;
     int cnt_;
 };
 
@@ -253,6 +258,10 @@ public:
     {
         assert(wrapper_ != nullptr);
         return wrapper_->GetBuffer()->buf;
+    }
+    size_t GetSize()
+    {
+        return wrapper_->GetSize();
     }
 
 private:

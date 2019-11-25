@@ -79,6 +79,15 @@ public:
   {
     return container_[i];
   }
+  int GetNum()
+  {
+    int num = 0;
+    for (int i = 0; i < 256; i++)
+    {
+      num += container_[i].v.IsValid() ? 1 : 0;
+    }
+    return num;
+  }
 
 private:
   Container container_[256];

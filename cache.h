@@ -75,13 +75,13 @@ public:
         c.needs_written_ = false;
     }
     Cache(const Cache &c) = delete;
-    Cache(uint64_t ticket, SharedDmaBuffer dma, size_t buf_offset)
+    Cache(uint64_t ticket, SharedDmaBuffer dma, size_t buf_offset, bool needs_written)
     {
         ticket_ = ticket;
         dma_ = std::move(dma);
         buf_offset_ = buf_offset;
         is_valid_ = true;
-        needs_written_ = false;
+        needs_written_ = needs_written;
     }
     ~Cache()
     {
