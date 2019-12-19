@@ -97,8 +97,8 @@ public:
         is_valid_ = c.is_valid_;
         if (is_valid_)
         {
-            dma_ = std::move(c.dma_);
             buf_offset_ = c.buf_offset_;
+            dma_ = std::move(c.dma_);
         }
         needs_written_ = c.needs_written_;
         ticket_ = c.ticket_;

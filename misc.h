@@ -16,6 +16,12 @@ extern bool debug_flag; //debug
 //#pragma clang optimize off
 //#undef NDEBUG
 
+#ifdef NDEBUG
+static const bool kDebug = false;
+#else
+static const bool kDebug = true;
+#endif
+
 static inline uint64_t ve_gettime()
 {
     uint64_t ret;

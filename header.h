@@ -174,19 +174,15 @@ private:
     }
     void ChunkmapRead()
     {
-        vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
-        if (!dma)
-        {
-            printf("allocation failure\n");
-            exit(1);
-        }
+        vfio_dma_t dma;
+        ns_wrapper_.Alloc(&dma, kChunkSize);
         for (u64 offset = 0; offset < Chunkmap::kSize; offset += kChunkSize)
         {
-            ns_wrapper_.Read(dma->buf, GetBlockNumFromSize(kChunkmapStartPos + offset),
+            ns_wrapper_.Read(dma.buf, GetBlockNumFromSize(kChunkmapStartPos + offset),
                              GetBlockNumFromSize(kChunkSize));
-            chunkmap_.Read(offset, dma->buf);
+            chunkmap_.Read(offset, dma.buf);
         }
-        ns_wrapper_.Free(dma);
+        ns_wrapper_.Free(&dma);
     }
     std::deque<Inode::AsyncIoContext> ChunkmapWrite()
     {

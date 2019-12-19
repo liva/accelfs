@@ -6,6 +6,9 @@ std::unique_ptr<Vefs> Vefs::vefs_;
 const char *Header::kVersionString = "VEDIOF15";
 std::vector<TimeInfo *> time_list_;
 
+thread_local int UnvmeWrapper::memleak_count_index_ = -1;
+std::atomic<int> UnvmeWrapper::memleak_count_current_index_(0);
+
 bool debug_time_ = false;
 bool redirect_ = false;
 bool header_dump_ = false;
@@ -144,24 +147,20 @@ bool Header::Read()
 {
     bool error = false;
 
-    vfio_dma_t *dma = ns_wrapper_.Alloc(kChunkSize);
-    if (!dma)
-    {
-        printf("allocation failure\n");
-        exit(1);
-    }
+    vfio_dma_t dma;
+    ns_wrapper_.Alloc(&dma, kChunkSize);
     header_exchunks_.clear();
     u64 hchunk_pos = kHeaderStartPos;
     HeaderBuffer buf;
     while (true)
     {
-        if (ns_wrapper_.Read(dma->buf, GetBlockNumFromSize(hchunk_pos), GetBlockNumFromSize(kChunkSize)))
+        if (ns_wrapper_.Read(dma.buf, GetBlockNumFromSize(hchunk_pos), GetBlockNumFromSize(kChunkSize)))
         {
             printf("failed to unvme_read");
             exit(1);
         }
         HeaderBuffer tmp_buf;
-        tmp_buf.AppendRaw(dma->buf, kChunkSize);
+        tmp_buf.AppendRaw(dma.buf, kChunkSize);
         tmp_buf.ResetPos();
 
         if (!tmp_buf.CompareRaw(kVersionString, strlen(kVersionString)))
@@ -196,6 +195,6 @@ bool Header::Read()
         }
         ChunkmapRead();
     }
-    ns_wrapper_.Free(dma);
+    ns_wrapper_.Free(&dma);
     return !error;
 }
