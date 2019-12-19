@@ -146,7 +146,6 @@ public:
     {
       RedirectWrite(offset, data, size);
     }
-    MEASURE_TIME;
     RetrieveContexts();
 
     size_t oldsize = GetLen();
@@ -171,7 +170,6 @@ public:
     DmaContext dma_list[dma_ctx_array_size];
     size_t dma_ctx_num = 0;
 
-    MEASURE_TIME;
     {
       for (size_t coffset = aoffset; coffset < AlignChunkUp(end); coffset += 2 * 1024 * 1024)
       {
@@ -186,7 +184,6 @@ public:
         dma_ctx_num++;
       }
     }
-    MEASURE_TIME;
     struct IoContext
     {
       uint64_t lba;
@@ -256,7 +253,6 @@ public:
         }
       }
     }
-    MEASURE_TIME;
 
     {
       for (auto it = io_list.begin(); it != io_list.end(); ++it)
@@ -288,7 +284,6 @@ public:
       assert(csize == 0);
     }
 
-    MEASURE_TIME;
     {
       CacheList::Vector release_cache_list;
       for (size_t dma_list_index = 0; dma_list_index < dma_ctx_num; dma_list_index++)

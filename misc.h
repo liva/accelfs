@@ -78,9 +78,13 @@ private:
 
 #define _GENVAR(x, y) x##y
 #define GENVAR(x, y) _GENVAR(x, y)
+#if 0
 #define MEASURE_TIME                                                     \
     static TimeInfo GENVAR(ti, __LINE__)(__PRETTY_FUNCTION__, __LINE__); \
     TimeMeasure GENVAR(tm, __LINE__)(GENVAR(ti, __LINE__));
+#else
+#define MEASURE_TIME
+#endif
 
 void DumpTime();
 
