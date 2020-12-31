@@ -45,21 +45,18 @@ extern bool header_dump_;
 extern bool debug_flag; //debug
 
 //#pragma clang optimize off
-//#undef NDEBUG
 
-#ifdef NDEBUG
 static const bool kDebug = false;
-#else
-static const bool kDebug = true;
-#endif
 
 static inline uint64_t ve_gettime()
 {
     uint64_t ret;
     void *vehva = ((void *)0x000000001000);
+    asm volatile("":::"memory");
     asm volatile("lhm.l %0,0(%1)"
                  : "=r"(ret)
                  : "r"(vehva));
+    asm volatile("":::"memory");
     return ((uint64_t)1000 * ret) / 800;
 }
 

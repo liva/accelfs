@@ -224,7 +224,7 @@ private:
             {
                 continue;
             }
-            SharedDmaBuffer dma(ns_wrapper_, kChunkSize);
+            SharedDmaBuffer dma(dmabuf_allocator_, ns_wrapper_, kChunkSize);
             chunkmap_.Write(offset, dma.GetBuffer());
             unvme_iod_t iod = ns_wrapper_.Awrite(dma.GetBuffer(), GetBlockNumFromSize(kChunkmapStartPos + offset),
                                                  GetBlockNumFromSize(kChunkSize));
@@ -248,6 +248,7 @@ private:
     static const u64 kChunkmapStartPos = kHeaderStartPos + kChunkSize;
     static const u64 kDataStorageStartPos = kChunkmapStartPos + Chunkmap::kSize;
     UnvmeWrapper &ns_wrapper_;
+  StaticAllocator<DmaBufferWrapper> dmabuf_allocator_;
     std::atomic<int> lock_;
     std::vector<Inode *> inodes_;
     static const char *kVersionString;

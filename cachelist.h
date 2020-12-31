@@ -99,9 +99,10 @@ public:
         available_--;
     }
     // element should be released in advance
-    void RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma, bool needs_written, Vector &release_cache_list)
+    int RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma, bool needs_written, std::pair<ChunkIndex, Cache> *release_cache_list)
     {
         size_t buf_offset = 0;
+        int cnt = 0;
         for (int i = 0; i < num; i++)
         {
             CacheContainer::Container old;
@@ -111,7 +112,9 @@ public:
                 // flush current cache
                 if (old.v.IsWriteNeeded())
                 {
-                    release_cache_list.push_back(std::move(std::make_pair(old.k, std::move(old.v))));
+                  release_cache_list[cnt].first = old.k;
+                  new (&release_cache_list[cnt].second)Cache(std::move(old.v));
+                  cnt++;
                 }
                 else
                 {
@@ -126,6 +129,7 @@ public:
             buf_offset += kChunkSize;
             cache_ticket_++;
         }
+        return cnt;
     }
     void ReserveSlots(std::vector<ChunkIndex> incoming_indexes, Vector &release_cache_list)
     {

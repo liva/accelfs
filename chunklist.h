@@ -91,6 +91,18 @@ public:
         }
         return buf_[index / Child::GetEntryNum()]->GetFromIndex(index % Child::GetEntryNum());
     }
+  void Apply(uint64_t index, uint64_t *lba_array)
+  {
+    CheckIndex(index);
+    if (buf_[index / Child::GetEntryNum()] == nullptr)
+      {
+        buf_[index / Child::GetEntryNum()] = new Child(*lba_array);
+        lba_array++;
+        updated_ = true;
+      }
+    buf_[index / Child::GetEntryNum()]->Apply(index % Child::GetEntryNum(), lba_array);
+    return;
+  }
     bool Apply(uint64_t index, uint64_t lba)
     {
         CheckIndex(index);
@@ -102,6 +114,13 @@ public:
         }
         return buf_[index / Child::GetEntryNum()]->Apply(index % Child::GetEntryNum(), lba);
     }
+  int ReportUnallocatedCnt(uint64_t index) {
+    CheckIndex(index);
+    if (buf_[index / Child::GetEntryNum()] == nullptr) {
+      return kLevel + 1;
+    }
+    return buf_[index / Child::GetEntryNum()]->ReportUnallocatedCnt(index % Child::GetEntryNum());
+  }
     void Write(uint64_t *buf, uint64_t &lba)
     {
         if (updated_)
@@ -233,6 +252,14 @@ public:
         assert(index < kLen);
         return buf_[index];
     }
+  void Apply(uint64_t index, uint64_t *lba_array)
+    {
+        assert(index < kLen);
+        if (buf_[index] == 0) {
+          buf_[index] = *lba_array;
+          updated_ = true;
+        }
+    }
     bool Apply(uint64_t index, uint64_t lba)
     {
         assert(index < kLen);
@@ -241,6 +268,10 @@ public:
         updated_ = true;
         return true;
     }
+  int ReportUnallocatedCnt(uint64_t index)  {
+    assert(index < kLen);
+    return buf_[index] == 0 ? 1 : 0;
+  }
     void Write(uint64_t *buf, uint64_t &lba)
     {
         memcpy(buf, buf_, kLen * sizeof(uint64_t));
@@ -416,6 +447,52 @@ public:
         }
         abort();
     }
+    void Apply(uint64_t index, uint64_t *lba_array)
+    {
+        CheckIndex(index);
+        if (index < Child0::GetEntryNum())
+        {
+            child0_.Apply(index, lba_array);
+            return;
+        }
+        index -= Child0::GetEntryNum();
+        if (index < Child1::GetEntryNum())
+        {
+            if (child1_ == nullptr)
+            {
+                child1_ = new Child1(*lba_array);
+                lba_array++;
+                updated_ = true;
+            }
+            child1_->Apply(index, lba_array);
+            return;
+        }
+        index -= Child1::GetEntryNum();
+        if (index < Child2::GetEntryNum())
+        {
+            if (child2_ == nullptr)
+            {
+                child2_ = new Child2(*lba_array);
+                lba_array++;
+                updated_ = true;
+            }
+            child2_->Apply(index, lba_array);
+            return;
+        }
+        index -= Child2::GetEntryNum();
+        if (index < Child3::GetEntryNum())
+        {
+            if (child3_ == nullptr)
+            {
+                child3_ = new Child3(*lba_array);
+                lba_array++;
+                updated_ = true;
+            }
+            child3_->Apply(index, lba_array);
+            return;
+        }
+        abort();
+    }
     // return value: success or require another lba
     bool Apply(uint64_t index, uint64_t lba)
     {
@@ -459,7 +536,42 @@ public:
         }
         abort();
     }
-    void Truncate(size_t len, std::vector<uint64_t> &release_list)
+  int ReportUnallocatedCnt(uint64_t index) {
+        CheckIndex(index);
+        if (index < Child0::GetEntryNum())
+        {
+            return child0_.ReportUnallocatedCnt(index);
+        }
+        index -= Child0::GetEntryNum();
+        if (index < Child1::GetEntryNum())
+        {
+            if (child1_ == nullptr)
+            {
+              return 2;
+            }
+            return child1_->ReportUnallocatedCnt(index);
+        }
+        index -= Child1::GetEntryNum();
+        if (index < Child2::GetEntryNum())
+        {
+            if (child2_ == nullptr)
+            {
+              return 3;
+            }
+            return child2_->ReportUnallocatedCnt(index);
+        }
+        index -= Child2::GetEntryNum();
+        if (index < Child3::GetEntryNum())
+        {
+            if (child3_ == nullptr)
+            {
+              return 4;
+            }
+            return child3_->ReportUnallocatedCnt(index);
+        }
+        abort();
+  }
+  void Truncate(size_t len, std::vector<uint64_t> &release_list)
     {
         if (len < len_)
         {
@@ -468,6 +580,12 @@ public:
         len_ = len;
         updated_ = true;
         assert(len_ <= MaxLen());
+    }
+  void Expand(size_t len)
+    {
+        assert(len <= MaxLen() && len_ < len);
+        len_ = len;
+        updated_ = true;
     }
     size_t MaxLen()
     {

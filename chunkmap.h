@@ -155,9 +155,47 @@ public:
         }
         printf("\n");
     }
+  void FindUnused(int cnt, Chunkmap::Index *index_array)
+  {
+    assert(cnt > 0);
+    int cur = 0;
+      Spinlock lock(lock_);
+        for (uint64_t i = last_allocated_index_; i < kMaxIndex; i++)
+        {
+            if (Get(i) == kUnused)
+            {
+                Set(i, kUsed);
+                SetDirtyFlag(i, true);
+                last_allocated_index_ = i;
+                index_array[cur] = Chunkmap::Index::CreateFromIndex(i);
+                cur++;
+                if (cur == cnt) {
+                  return;
+                }
+            }
+        }
+        for (uint64_t i = 1; i < last_allocated_index_; i++)
+        {
+            if (Get(i) == kUnused)
+            {
+                Set(i, kUsed);
+                SetDirtyFlag(i, true);
+                last_allocated_index_ = i;
+                index_array[cur] = Chunkmap::Index::CreateFromIndex(i);
+                cur++;
+                if (cur == cnt) {
+                  return;
+                }
+            }
+        }
+        for(int i = cur; i < cnt; i++) {
+          index_array[i] = Chunkmap::Index();
+        }
+        return;
+    }
     Index FindUnused()
     {
-        Spinlock lock(lock_);
+      Spinlock lock(lock_);
         for (uint64_t i = last_allocated_index_; i < kMaxIndex; i++)
         {
             if (Get(i) == kUnused)
@@ -191,6 +229,10 @@ public:
         Set(i.Get(), kUnused);
         SetDirtyFlag(i.Get(), true);
     }
+  std::atomic<int> &GetLockFlag()
+  {
+    return lock_;
+  }
 
 private:
     void Set(uint64_t index, bool flag)

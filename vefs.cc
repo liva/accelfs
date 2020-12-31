@@ -111,7 +111,7 @@ std::deque<Inode::AsyncIoContext> Header::Write()
     size_t extra_chunk = 0;
     while (true)
     {
-        SharedDmaBuffer dma(ns_wrapper_, kChunkSize);
+      SharedDmaBuffer dma(dmabuf_allocator_, ns_wrapper_, kChunkSize);
         size_t output_size = content_buf.Output(reinterpret_cast<char *>(dma.GetBuffer()) + info_size, kChunkSize - info_size);
         bool output_completed = (output_size != kChunkSize - info_size);
 
