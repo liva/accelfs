@@ -188,6 +188,9 @@ public:
   Status Write(size_t offset, const void *data, size_t size)
   {
     MEASURE_TIME;
+    if (size == 0) {
+      return Status:: kOk;
+    }
     Spinlock lock(GetLock());
     vefs_printf("w[%s %lu %lu]\n", GetFname().c_str(), offset, size);
     if (redirect_)
