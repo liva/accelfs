@@ -45,4 +45,5 @@ docker exec -it vefs cp libvefs.a /opt/nec/ve/ex_lib/
 docker exec -it vefs cp vefs.cc /opt/nec/ve/ex_lib/
 docker commit vefs vefs:develop
 docker rm -f vefs
-
+cd itest
+./run.sh

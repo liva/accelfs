@@ -138,9 +138,9 @@ public:
   {
     assert(!inode_updated_);
     assert(io_waiting_queue_.IsEmpty());
-    if (cl_ != nullptr)
+    if (chunklist_ != nullptr)
     {
-      delete cl_;
+      delete chunklist_;
     }
     double ioqueue_overflow_rate = (io_wait_ctxfull_cnt_ * 100.0) / io_wait_cnt_;
     if (ioqueue_overflow_rate > 10.0) {
@@ -149,13 +149,13 @@ public:
   }
   Status Truncate(size_t len)
   {
-    if (len > cl_->MaxLen())
+    if (len > chunklist_->MaxLen())
     {
       return Status::kIoError;
     }
     size_t old_len = GetLen();
     std::vector<uint64_t> release_list;
-    cl_->Truncate(len, release_list);
+    chunklist_->Truncate(len, release_list);
     if (len < old_len)
     {
       for (auto it = release_list.begin(); it != release_list.end(); ++it)
@@ -173,7 +173,7 @@ public:
   }
   Status Expand(size_t len)
   {
-    if (len > cl_->MaxLen())
+    if (len > chunklist_->MaxLen())
     {
       return Status::kIoError;
     }
@@ -182,7 +182,7 @@ public:
     {
       return Status::kIoError;
     }
-    cl_->Expand(len);
+    chunklist_->Expand(len);
     return Status::kOk;
   }
   Status Write(size_t offset, const void *data, size_t size)
@@ -207,156 +207,36 @@ public:
         return Status::kIoError;
       }
     }
-    size_t aoffset = AlignChunk(offset);
 
-    struct DmaContext
-    {
-      ChunkIndex cindex;
-      SharedDmaBuffer dma;
-    };
-
-    size_t dma_ctx_array_size = (AlignChunkUp(end) - aoffset) / kChunkSize;
-    DmaContext dma_list[dma_ctx_array_size];
-    size_t dma_ctx_num = 0;
-
-    {
-      for (size_t coffset = aoffset; coffset < AlignChunkUp(end); coffset += 2 * 1024 * 1024)
-      {
-        size_t size = 2 * 1024 * 1024;
-        if (coffset + size > AlignChunkUp(end))
-        {
-          size = AlignChunkUp(end) - coffset;
+    size_t written = 0;
+    
+    // append
+    if (offset == oldsize) {
+      while(cachelist_.CheckIfExistAndIncCnt(ChunkIndex::CreateFromPos(offset + written))) {
+        size_t cend = AlignChunk(offset + written + kChunkSize);
+        if (cend > end) {
+          cend = end;
         }
-        dma_list[dma_ctx_num] = DmaContext{
-            ChunkIndex::CreateFromPos(coffset),
-            SharedDmaBuffer(dmabuf_allocator_, ns_wrapper_, size)};
-        dma_ctx_num++;
+        AppendInChunk(offset + written, (const char*)data + written, cend - offset - written);
+        written = cend - offset;
+        if (written == size) {
+          return Status::kOk;
+        }
       }
-    }
-    struct IoContext
-    {
-      uint64_t lba;
-      ChunkIndex cindex;
-      DmaContext *dma;
-      size_t indmabuf_offset;
-      unvme_iod_t iod;
-    };
 
-    int io_list_max = 0;
-    for (size_t coffset = offset; coffset < end; coffset = GetNextChunkBoundary(coffset)) {
-      io_list_max++;
-    }
-    int io_list_cnt = 0;
-
-    {
-      IoContext io_list[io_list_max];
-      for (size_t coffset = offset; coffset < end; coffset = GetNextChunkBoundary(coffset)) {
-        size_t caoffset = AlignChunk(coffset);
-        if (oldsize <= caoffset) {
-          // no cache and no data on the storage, thus we can skip the following step
-          continue;
-        }
+      if (size - written <= 2 * 1024 * 1024) {
+        SharedDmaBuffer dma = SharedDmaBuffer(dmabuf_allocator_, ns_wrapper_, 2 * 1024 * 1024);
+        memcpy((char *)dma.GetBuffer(), (const char*)data + written, size - written);
+        std::pair<ChunkIndex, Cache> release_cache_list[(2 * 1024 * 1024) / kChunkSize];
+        int release_cache_cnt = cachelist_.RegisterToCache(dma.GetSize() / kChunkSize, ChunkIndex::CreateFromPos(offset + written), std::move(dma), true, release_cache_list);
         
-        size_t boundary = GetNextChunkBoundary(coffset);
-        size_t io_size = boundary - coffset;
-        if (boundary > end)
-          {
-            io_size = end - coffset;
-          }
-                
-        ChunkIndex cindex = ChunkIndex::CreateFromPos(coffset);
-        
-        bool whole_overwrite = (coffset == caoffset && io_size == kChunkSize);
-        
-        size_t dma_list_index = (coffset - aoffset) / (2 * 1024 * 1024);
-        size_t indmabuf_offset = (caoffset - aoffset) % (2 * 1024 * 1024);
+        CleanupCacheListsAndContexts(release_cache_cnt, release_cache_list);
 
-        DmaContext *dma_ctx = &dma_list[dma_list_index];
-
-        if (!cachelist_.CheckIfExistAndIncCnt(cindex)) {
-          uint64_t lba;
-          if (GetLba(cindex.GetPos(), lba) != Status::kOk) {
-            return Status::kIoError;
-          }
-          if (!whole_overwrite) {
-            io_list[io_list_cnt]
-              = std::move(IoContext{
-                                    lba,
-                                    cindex,
-                                    dma_ctx,
-                                    indmabuf_offset,
-                                    nullptr,
-                });
-            io_list_cnt++;
-          }
-        } else {
-          if (!whole_overwrite) {
-            cachelist_.Apply(cindex, (char *)dma_ctx->dma.GetBuffer() + indmabuf_offset, 0, kChunkSize);
-          }
-          cachelist_.ForceRelease(cindex); // new cache will be registered from buffer later
-        }
-      }
-
-      if (io_list_cnt != 0) {
-        {
-          Spinlock lock(ns_wrapper_.GetLockFlag());
-          
-          for (int i = 0; i < io_list_cnt; i++) {
-            IoContext &ctx = io_list[i];
-            ctx.iod = ns_wrapper_.AreadInternal((void *)((char *)ctx.dma->dma.GetBuffer() + ctx.indmabuf_offset), ctx.lba, kChunkSize / ns_wrapper_.GetBlockSize());
-          }
-        }
-      
-        for (int i = 0; i < io_list_cnt; i++) {
-          IoContext &ctx = io_list[i];
-          if (ns_wrapper_.Apoll(ctx.iod)) {
-            printf("unvme apoll failed\n");
-            abort();
-          }
-        }
-      }
-
-      {
-        size_t indma_offset = offset % kChunkSize;
-        char *cdata = (char *)data;
-        size_t csize = size;
-        for (size_t dma_list_index = 0; dma_list_index < dma_ctx_num; dma_list_index++)
-          {
-            size_t copy_size = dma_list[dma_list_index].dma.GetSize() - indma_offset;
-            if (csize < copy_size)
-              {
-                copy_size = csize;
-              }
-            memcpy((char *)dma_list[dma_list_index].dma.GetBuffer() + indma_offset, cdata, copy_size);
-            indma_offset = 0;
-            cdata += copy_size;
-            csize -= copy_size;
-          }
-        assert(csize == 0);
+        return Status::kOk;
       }
     }
 
-    {
-      int release_cache_list_max = ((2 * 1024 * 1024) / kChunkSize) * dma_ctx_num;
-      std::pair<ChunkIndex, Cache> release_cache_list[release_cache_list_max];
-      int release_cache_cnt = 0;
-      for (size_t dma_list_index = 0; dma_list_index < dma_ctx_num; dma_list_index++)
-      {
-        release_cache_cnt += cachelist_.RegisterToCache(dma_list[dma_list_index].dma.GetSize() / kChunkSize, dma_list[dma_list_index].cindex, std::move(dma_list[dma_list_index].dma), true, release_cache_list + release_cache_cnt);
-      }
-
-      if (!io_waiting_queue_.IsEmpty() || release_cache_cnt != 0) {
-        Spinlock lock(ns_wrapper_.GetLockFlag());
-        if (!io_waiting_queue_.IsEmpty()) {
-          RetrieveContexts();
-        }
-        for (int i = 0; i < release_cache_cnt; i++) {
-          ReleaseCacheList(release_cache_list[i].first, release_cache_list[i].second);
-        }
-      }
-    }
-
-    return Status::kOk;
+    return WriteInternal(offset + written, (const char*)data + written, size - written);
   }
   Status
   Read2(uint64_t offset, size_t size, char *scratch)
@@ -621,12 +501,12 @@ public:
   }
   size_t GetLen()
   {
-    return cl_->GetLen();
+    return chunklist_->GetLen();
   }
   Status GetLba(size_t offset, u64 &lba)
   {
     size_t chunk_index = offset / kChunkSize;
-    uint64_t lba_tmp = cl_->GetFromIndex(chunk_index);
+    uint64_t lba_tmp = chunklist_->GetFromIndex(chunk_index);
     while (lba_tmp == 0)
     {
       Chunkmap::Index cindex = chunkpool_.Get();
@@ -635,9 +515,9 @@ public:
         return Status::kIoError;
       }
       uint64_t allocated_lba = cindex.GetPos() / ns_wrapper_.GetBlockSize();
-      if (cl_->Apply(chunk_index, allocated_lba))
+      if (chunklist_->Apply(chunk_index, allocated_lba))
       {
-        assert(allocated_lba == cl_->GetFromIndex(chunk_index));
+        assert(allocated_lba == chunklist_->GetFromIndex(chunk_index));
         lba_tmp = allocated_lba;
       }
     }
@@ -661,7 +541,7 @@ public:
     buf.Append('\0');
     buf.AlignPos();
 
-    buf.Append(cl_->GetLba());
+    buf.Append(chunklist_->GetLba());
 
     inode_updated_ = false;
   }
@@ -776,15 +656,15 @@ public:
   }
   void DumpChunkList()
   {
-    cl_->Dump();
+    chunklist_->Dump();
   }
   bool IsChunkListUpdated()
   {
-    return cl_->IsUpdated();
+    return chunklist_->IsUpdated();
   }
   bool ChunkListWrite(void *buf, uint64_t &lba)
   {
-    return cl_->Write(buf, lba);
+    return chunklist_->Write(buf, lba);
   }
   void RegisterWaitingContext(AsyncIoContext &&ctx)
   {
@@ -803,12 +683,12 @@ public:
     inode_updated_ = false;
     WaitIoCompletion();
     Truncate(0);
-    chunkmap_.Release(Chunkmap::Index::CreateFromPos(cl_->GetLba() * ns_wrapper_.GetBlockSize()));
+    chunkmap_.Release(Chunkmap::Index::CreateFromPos(chunklist_->GetLba() * ns_wrapper_.GetBlockSize()));
     uint64_t dummy_lba;
     uint64_t buf[kChunkSize / sizeof(uint64_t)];
-    cl_->Write(reinterpret_cast<void *>(buf), dummy_lba);
-    delete cl_;
-    cl_ = nullptr;
+    chunklist_->Write(reinterpret_cast<void *>(buf), dummy_lba);
+    delete chunklist_;
+    chunklist_ = nullptr;
   }
   std::string &GetFname()
   {
@@ -821,10 +701,10 @@ public:
   }
 
 private:
-  Inode(std::string fname, ChunkList *cl, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper) : lock_(0), chunkmap_(chunkmap), ns_wrapper_(ns_wrapper), chunkpool_(chunkmap_)
+  Inode(std::string fname, ChunkList *chunklist, Chunkmap &chunkmap, UnvmeWrapper &ns_wrapper) : lock_(0), chunkmap_(chunkmap), ns_wrapper_(ns_wrapper), chunkpool_(chunkmap_)
   {
     fname_ = fname;
-    cl_ = cl;
+    chunklist_ = chunklist;
     inode_updated_ = true;
   }
   Status CacheSync(Cache &cache, ChunkIndex index, Inode::AsyncIoContext &ctx)
@@ -879,6 +759,170 @@ private:
            prev_lba + prev_iosize / ns_wrapper_.GetBlockSize() == cur_lba &&
            prev_iosize + cur_iosize <= 2 * 1024 * 1024;
   }
+  Status AppendInChunk(size_t offset, const char *data, size_t size) {
+    cachelist_.Refresh(ChunkIndex::CreateFromPos(offset), data, offset - AlignChunk(offset), size);
+    return Status::kOk;
+  }
+  Status WriteInternal(size_t offset, const char *data, size_t size)
+  {
+    printf("WARNING: slow path\n");
+    size_t oldsize = GetLen();
+    size_t end = offset + size;
+
+    size_t aoffset = AlignChunk(offset);
+
+    struct DmaContext
+    {
+      ChunkIndex cindex;
+      SharedDmaBuffer dma;
+    };
+
+    size_t dma_ctx_array_size = (AlignChunkUp(end) - aoffset) / kChunkSize;
+    DmaContext dma_list[dma_ctx_array_size];
+    size_t dma_ctx_num = 0;
+
+    {
+      for (size_t coffset = aoffset; coffset < AlignChunkUp(end); coffset += 2 * 1024 * 1024)
+      {
+        size_t size = 2 * 1024 * 1024;
+        if (coffset + size > AlignChunkUp(end))
+        {
+          size = AlignChunkUp(end) - coffset;
+        }
+        dma_list[dma_ctx_num] = DmaContext{
+            ChunkIndex::CreateFromPos(coffset),
+            SharedDmaBuffer(dmabuf_allocator_, ns_wrapper_, size)};
+        dma_ctx_num++;
+      }
+    }
+    struct IoContext
+    {
+      uint64_t lba;
+      ChunkIndex cindex;
+      DmaContext *dma;
+      size_t indmabuf_offset;
+      unvme_iod_t iod;
+    };
+
+    int io_list_max = 0;
+    for (size_t coffset = offset; coffset < end; coffset = GetNextChunkBoundary(coffset)) {
+      io_list_max++;
+    }
+    int io_list_cnt = 0;
+
+    {
+      IoContext io_list[io_list_max];
+      for (size_t coffset = offset; coffset < end; coffset = GetNextChunkBoundary(coffset)) {
+        size_t caoffset = AlignChunk(coffset);
+        if (oldsize <= caoffset) {
+          // no cache and no data on the storage, thus we can skip the following step
+          continue;
+        }
+        
+        size_t boundary = GetNextChunkBoundary(coffset);
+        size_t io_size = boundary - coffset;
+        if (boundary > end)
+          {
+            io_size = end - coffset;
+          }
+                
+        ChunkIndex cindex = ChunkIndex::CreateFromPos(coffset);
+        
+        bool whole_overwrite = (coffset == caoffset && io_size == kChunkSize);
+        
+        size_t dma_list_index = (coffset - aoffset) / (2 * 1024 * 1024);
+        size_t indmabuf_offset = (caoffset - aoffset) % (2 * 1024 * 1024);
+
+        DmaContext *dma_ctx = &dma_list[dma_list_index];
+
+        if (!cachelist_.CheckIfExistAndIncCnt(cindex)) {
+          uint64_t lba;
+          if (GetLba(cindex.GetPos(), lba) != Status::kOk) {
+            return Status::kIoError;
+          }
+          if (!whole_overwrite) {
+            io_list[io_list_cnt]
+              = std::move(IoContext{
+                                    lba,
+                                    cindex,
+                                    dma_ctx,
+                                    indmabuf_offset,
+                                    nullptr,
+                });
+            io_list_cnt++;
+          }
+        } else {
+          if (!whole_overwrite) {
+            cachelist_.Apply(cindex, (char *)dma_ctx->dma.GetBuffer() + indmabuf_offset, 0, kChunkSize);
+          }
+          cachelist_.ForceRelease(cindex); // new cache will be registered from buffer later
+        }
+      }
+
+      if (io_list_cnt != 0) {
+        {
+          Spinlock lock(ns_wrapper_.GetLockFlag());
+          
+          for (int i = 0; i < io_list_cnt; i++) {
+            IoContext &ctx = io_list[i];
+            ctx.iod = ns_wrapper_.AreadInternal((void *)((char *)ctx.dma->dma.GetBuffer() + ctx.indmabuf_offset), ctx.lba, kChunkSize / ns_wrapper_.GetBlockSize());
+          }
+        }
+      
+        for (int i = 0; i < io_list_cnt; i++) {
+          IoContext &ctx = io_list[i];
+          if (ns_wrapper_.Apoll(ctx.iod)) {
+            printf("unvme apoll failed\n");
+            abort();
+          }
+        }
+      }
+
+      {
+        size_t indma_offset = offset % kChunkSize;
+        const char *cdata = data;
+        size_t csize = size;
+        for (size_t dma_list_index = 0; dma_list_index < dma_ctx_num; dma_list_index++)
+          {
+            size_t copy_size = dma_list[dma_list_index].dma.GetSize() - indma_offset;
+            if (csize < copy_size)
+              {
+                copy_size = csize;
+              }
+            memcpy((char *)dma_list[dma_list_index].dma.GetBuffer() + indma_offset, cdata, copy_size);
+            indma_offset = 0;
+            cdata += copy_size;
+            csize -= copy_size;
+          }
+        assert(csize == 0);
+      }
+    }
+
+    {
+      int release_cache_list_max = ((2 * 1024 * 1024) / kChunkSize) * dma_ctx_num;
+      std::pair<ChunkIndex, Cache> release_cache_list[release_cache_list_max];
+      int release_cache_cnt = 0;
+      for (size_t dma_list_index = 0; dma_list_index < dma_ctx_num; dma_list_index++)
+      {
+        release_cache_cnt += cachelist_.RegisterToCache(dma_list[dma_list_index].dma.GetSize() / kChunkSize, dma_list[dma_list_index].cindex, std::move(dma_list[dma_list_index].dma), true, release_cache_list + release_cache_cnt);
+      }
+
+      CleanupCacheListsAndContexts(release_cache_cnt, release_cache_list);
+    }
+
+    return Status::kOk;
+  }
+  void CleanupCacheListsAndContexts(int release_cache_cnt, std::pair<ChunkIndex, Cache> *release_cache_list) {
+    if (!io_waiting_queue_.IsEmpty() || release_cache_cnt != 0) {
+      Spinlock lock(ns_wrapper_.GetLockFlag());
+      if (!io_waiting_queue_.IsEmpty()) {
+        RetrieveContexts();
+      }
+      for (int i = 0; i < release_cache_cnt; i++) {
+        ReleaseCacheList(release_cache_list[i].first, release_cache_list[i].second);
+      }
+    }
+  }
   template <class T>
   T AlignChunk(T val)
   {
@@ -893,7 +937,7 @@ private:
   std::atomic<int> lock_;
 
   std::string fname_;
-  ChunkList *cl_;
+  ChunkList *chunklist_;
 
   Chunkmap &chunkmap_;
   UnvmeWrapper &ns_wrapper_;

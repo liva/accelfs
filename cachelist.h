@@ -85,6 +85,12 @@ public:
         }
         return false;
     }
+    void Refresh(ChunkIndex cindex, const char *buf, size_t offset, size_t n)
+    {
+        Cache *c = container_.Get(cindex);
+        assert(c != nullptr);
+        c->Refresh(buf, offset, n);
+    }
     void Apply(ChunkIndex cindex, char *buf, size_t offset, size_t n)
     {
         Cache *c = container_.Get(cindex);
