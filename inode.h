@@ -189,7 +189,7 @@ public:
   {
     MEASURE_TIME;
     if (size == 0) {
-      return Status:: kOk;
+      return Status::kOk;
     }
     Spinlock lock(GetLock());
     vefs_printf("w[%s %lu %lu]\n", GetFname().c_str(), offset, size);
@@ -212,6 +212,7 @@ public:
     
     // append
     if (offset == oldsize) {
+      // write to cache if available
       while(cachelist_.CheckIfExistAndIncCnt(ChunkIndex::CreateFromPos(offset + written))) {
         size_t cend = AlignChunk(offset + written + kChunkSize);
         if (cend > end) {
@@ -224,6 +225,7 @@ public:
         }
       }
 
+      // no cache, then replace the old cache buffer with a new dmabuffer
       if (size - written <= 2 * 1024 * 1024) {
         SharedDmaBuffer dma = SharedDmaBuffer(dmabuf_allocator_, ns_wrapper_, 2 * 1024 * 1024);
         memcpy((char *)dma.GetBuffer(), (const char*)data + written, size - written);
@@ -358,6 +360,7 @@ public:
   Status
   Read(uint64_t offset, size_t size, char *scratch)
   {
+    //printf("read %lu %lu\n", offset, size);
     MEASURE_TIME;
     Spinlock lock(GetLock());
     size_t flen = GetLen();
@@ -569,12 +572,16 @@ public:
     if (c.IsWriteNeeded())
       {
         AsyncIoContext ctx;
-        if (CacheSync(c, index, ctx) != Status::kOk)
-          {
-            fprintf(stderr, "VEFS: cache awrite failed\n");
-            return Status::kIoError;
-          }
-        RegisterWaitingContext(std::move(ctx));
+        if (index.GetPos() >= GetLen()) {
+          c.ForceRelease();
+        } else {
+          if (CacheSync(c, index, ctx) != Status::kOk)
+            {
+              fprintf(stderr, "VEFS: cache awrite failed\n");
+              return Status::kIoError;
+            }
+          RegisterWaitingContext(std::move(ctx));
+        }
       }
     c.Release();
     return Status::kOk;
@@ -765,7 +772,7 @@ private:
   }
   Status WriteInternal(size_t offset, const char *data, size_t size)
   {
-    printf("WARNING: slow path\n");
+    //    printf("WARNING: slow path\n");
     size_t oldsize = GetLen();
     size_t end = offset + size;
 
