@@ -54,7 +54,7 @@ public:
     }
     bool IsEnd()
     {
-      return index_ == 256;
+      return index_ == kEntryNum;
     }
     Container *operator->()
     {
@@ -68,12 +68,12 @@ public:
     }
 
   private:
-    Iterator(SimpleHashCache &cache, const int index) : cache_(&cache), index_(index >= 256 ? 256 : index)
+    Iterator(SimpleHashCache &cache, const int index) : cache_(&cache), index_(index >= kEntryNum ? kEntryNum : index)
     {
     }
     static int FindNextIndex(SimpleHashCache *cache, int i)
     {
-      while (i < 256 && !cache->GetFromIndex(i).v.IsValid())
+      while (i < kEntryNum && !cache->GetFromIndex(i).v.IsValid())
       {
         i++;
       }
@@ -104,7 +104,7 @@ public:
   }
   static int GetIndexFromKey(Key key)
   {
-    return key.Get() % 256;
+    return key.Get() % kEntryNum;
   }
   Container &GetFromIndex(int i)
   {
@@ -113,15 +113,16 @@ public:
   int GetNum()
   {
     int num = 0;
-    for (int i = 0; i < 256; i++)
+    for (int i = 0; i < kEntryNum; i++)
     {
       num += container_[i].v.IsValid() ? 1 : 0;
     }
     return num;
   }
 
+  static const int kEntryNum = 256;
 private:
-  Container container_[256];
+  Container container_[kEntryNum];
 };
 
 #if 0
@@ -164,22 +165,22 @@ int main() {
   }
   {
     SimpleHashCache<TestKey, TestValue> h;
-    for(int i = 0; i < 256; i ++) {
+    for(int i = 0; i < h.kEntryNum; i ++) {
       h.Put(TestKey(i), TestValue(i));
     }
-    for(int i = 0; i < 256; i ++) {
+    for(int i = 0; i < h.kEntryNum; i ++) {
       assert(h.Get(TestKey(i))->Get() == i);
     }
   }
   {
     SimpleHashCache<TestKey, TestValue> h;
-    for(int i = 0; i < 512; i ++) {
+    for(int i = 0; i < h.kEntryNum * 2; i ++) {
       h.Put(TestKey(i), TestValue(i));
     }
-    for(int i = 0; i < 256; i ++) {
+    for(int i = 0; i < h.kEntryNum; i ++) {
       assert(h.Get(TestKey(i)) == nullptr);
     }
-    for(int i = 256; i < 512; i ++) {
+    for(int i = h.kEntryNum; i < h.kEntryNum * 2; i ++) {
       assert(h.Get(TestKey(i))->Get() == i);
     }
   }
