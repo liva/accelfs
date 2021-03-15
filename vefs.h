@@ -64,8 +64,8 @@ public:
   }
   ~Vefs()
   {
-    header_.Release();
     header_.WriteSync();
+    header_.Release();
   }
   void Dump()
   {
