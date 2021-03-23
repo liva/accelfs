@@ -186,7 +186,31 @@ public:
         {
             Inode *inode = *itr;
             printf("> %p %s [", inode, inode->GetFname().c_str());
-            /*            auto clist = inode->GetChunkList();
+            /* calc hash
+            size_t len = inode->GetLen();
+            if (len < 1024) {
+              char buf[len];
+              inode->Read(0, len, buf);
+              uint32_t sum = 0;
+              for(int i = 0; i < len / 4; i++) {
+                sum += ((unsigned int *)buf)[i];
+              }
+              printf("%x", sum);
+            } else {
+              char buf1[512], buf2[512];
+              inode->Read(0, 512, buf1);
+              inode->Read(len - 512, 512, buf2);
+              uint32_t sum = 0;
+              for(int i = 0; i < 512 / 4; i++) {
+                sum += ((unsigned int *)buf1)[i];
+              }
+              for(int i = 0; i < 512 / 4; i++) {
+                sum += ((unsigned int *)buf2)[i];
+              }
+              printf("%x", sum);
+              }*/
+            /* show chunklists
+            auto clist = inode->GetChunkList();
             for (auto it = clist.begin(); it != clist.end(); ++it)
             {
                 printf("%lu ", *it);

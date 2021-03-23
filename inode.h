@@ -226,7 +226,7 @@ public:
       }
 
       // no cache, then replace the old cache buffer with a new dmabuffer
-      if (size - written <= 2 * 1024 * 1024) {
+      if ((((offset + written) % kChunkSize) == 0) && (size - written <= 2 * 1024 * 1024)) {
         SharedDmaBuffer dma = SharedDmaBuffer(dmabuf_allocator_, ns_wrapper_, 2 * 1024 * 1024);
         memcpy((char *)dma.GetBuffer(), (const char*)data + written, size - written);
         std::pair<ChunkIndex, Cache> release_cache_list[(2 * 1024 * 1024) / kChunkSize];
