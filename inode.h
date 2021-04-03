@@ -38,6 +38,7 @@
 #include "unvme_wrapper.h"
 #include "chunklist.h"
 #include "cachelist.h"
+#include "autogen.h"
 
 class Inode
 {
@@ -209,7 +210,8 @@ public:
     }
 
     size_t written = 0;
-    
+
+#ifdef FAST_APPEND
     // append
     if (offset == oldsize) {
       // write to cache if available
@@ -227,9 +229,14 @@ public:
 
       // no cache, then replace the old cache buffer with a new dmabuffer
       if ((((offset + written) % kChunkSize) == 0) && (size - written <= 2 * 1024 * 1024)) {
-        SharedDmaBuffer dma = SharedDmaBuffer(dmabuf_allocator_, ns_wrapper_, 2 * 1024 * 1024);
+        #if 1
+        const size_t cache_size = 2 * 1024 * 1024;
+        #else
+        const size_t cache_size = AlignChunkUp(size - written);
+        #endif
+        SharedDmaBuffer dma = SharedDmaBuffer(dmabuf_allocator_, ns_wrapper_, cache_size);
         memcpy((char *)dma.GetBuffer(), (const char*)data + written, size - written);
-        std::pair<ChunkIndex, Cache> release_cache_list[(2 * 1024 * 1024) / kChunkSize];
+        std::pair<ChunkIndex, Cache> release_cache_list[cache_size / kChunkSize];
         int release_cache_cnt = cachelist_.RegisterToCache(dma.GetSize() / kChunkSize, ChunkIndex::CreateFromPos(offset + written), std::move(dma), true, release_cache_list);
         
         CleanupCacheListsAndContexts(release_cache_cnt, release_cache_list);
@@ -237,7 +244,7 @@ public:
         return Status::kOk;
       }
     }
-
+#endif
     return WriteInternal(offset + written, (const char*)data + written, size - written);
   }
   Status

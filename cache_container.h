@@ -31,6 +31,7 @@
 
 #include <stdint.h>
 #include <assert.h>
+#include "autogen.h"
 
 template <class Key, class Value>
 class SimpleHashCache
@@ -120,7 +121,11 @@ public:
     return num;
   }
 
+  #ifdef LARGE_CACHE
+  static const int kEntryNum = 2048;
+  #else
   static const int kEntryNum = 256;
+  #endif
 private:
   Container container_[kEntryNum];
 };

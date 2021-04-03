@@ -32,6 +32,13 @@
 #!/bin/sh -xe
 OPTION="-g3 -O2 -DNDEBUG"
 #OPTION="-g3"
+echo "#ifndef VEFS_SCRIPT_AUTOGEN_H_" > autogen.h
+echo "#define VEFS_SCRIPT_AUTOGEN_H_" >> autogen.h
+for OPT in ${1}
+do
+    echo "#define ${OPT}" >> autogen.h
+done
+echo "#endif" >> autogen.h
 docker run --rm -it -v $PWD:$PWD -w $PWD unvme:ve /opt/nec/nosupport/llvm-ve/bin/clang++ --target=ve-linux --std=c++11 $OPTION -c vefs.cc
 docker rm -f vefs || :
 docker run -d --name vefs -it -v $PWD:$PWD -w $PWD unvme:ve sh
@@ -45,5 +52,6 @@ docker exec -it vefs cp libvefs.a /opt/nec/ve/ex_lib/
 docker exec -it vefs cp vefs.cc /opt/nec/ve/ex_lib/
 docker commit vefs vefs:develop
 docker rm -f vefs
+rm -rf autogen.h
 cd itest
 ./run.sh
