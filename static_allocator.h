@@ -120,7 +120,11 @@ private:
   static constexpr size_t GetAlignedStructSize() {
     return ((sizeof(T) + 7) / 8) * 8;
   }
+  #if 1
+  static const int kBufferMax = 32768;
+  #else
   static const int kBufferMax = 4096;
+  #endif
   bool _map[kBufferMax];
   int _cur = 0;
   int _cnt = 0;

@@ -205,6 +205,7 @@ public:
     {
       if (Expand(end) != Status::kOk)
       {
+        fprintf(stderr, "vefs: expand error(%lu %lu %lu %lu)\n", end, oldsize, offset, size);
         return Status::kIoError;
       }
     }
@@ -852,6 +853,7 @@ private:
         if (!cachelist_.CheckIfExistAndIncCnt(cindex)) {
           uint64_t lba;
           if (GetLba(cindex.GetPos(), lba) != Status::kOk) {
+            fprintf(stderr, "vefs: getlba error\n");
             return Status::kIoError;
           }
           if (!whole_overwrite) {
@@ -1013,7 +1015,11 @@ private:
     int Next(const int v) {
       return (v + 1) % kSize;
     }
+    #if 1
+    static const int kSize = 4096;
+    #else
     static const int kSize = 256;
+    #endif
     int head_ = 0;
     int tail_ = 0;
     AsyncIoContext buf_[kSize];

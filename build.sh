@@ -1,3 +1,4 @@
+#!/bin/bash -lxe
 #
 # Copyright 2020 NEC Laboratories Europe GmbH
 # All rights reserved
@@ -29,7 +30,6 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-#!/bin/sh -xe
 OPTION="-g3 -O2 -DNDEBUG"
 #OPTION="-g3"
 echo "#ifndef VEFS_SCRIPT_AUTOGEN_H_" > autogen.h

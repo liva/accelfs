@@ -1,0 +1,51 @@
+#!/bin/bash -xe
+#TIME="TIME=true"
+#GDB="/opt/nec/ve/bin/gdb --args"
+#OUTPUT=">>output"
+PCIDEV="0000:04:00.0"
+
+date
+date > output
+    echo ">>>$TARGET" >> output
+    for BSIZE in 32760 #100 32761
+    do
+	rm -f vefs vefs_recheck unvme redirect
+	docker run --rm -it -v $PWD:$PWD -w $PWD vefs:develop sh -c "make BSIZE=$BSIZE"
+
+	if test 1 -eq 1 ; then
+	    echo ">>>${BSIZE}" >> output
+
+            # cleanup
+            echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/uio_pci_generic/unbind || :
+            echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/nvme/bind || :
+            sleep 3
+
+	    sudo blkdiscard /dev/nvme0n1
+	    sleep 1
+	
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/nvme/unbind
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/uio_pci_generic/bind
+            docker run --device=`readlink -f /dev/veslot0`:`readlink -f /dev/veslot0` -v /dev:/dev:z -v /var/opt/nec/ve/veos:/var/opt/nec/ve/veos:z -v ${HOME}:${HOME}:z -w ${PWD} --cap-add=SYS_PTRACE --security-opt="seccomp=unconfined" -it veos:develop sh -c "${TIME} ${GDB} ./vefs ${OUTPUT}"
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/uio_pci_generic/unbind
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/nvme/bind
+            
+            sleep 3
+            
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/nvme/unbind
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/uio_pci_generic/bind
+	    docker run --device=`readlink -f /dev/veslot0`:`readlink -f /dev/veslot0` -v /dev:/dev:z -v /var/opt/nec/ve/veos:/var/opt/nec/ve/veos:z -v ${HOME}:${HOME}:z -w ${PWD} --cap-add=SYS_PTRACE --security-opt="seccomp=unconfined" -it veos:develop sh -c "${TIME} ${GDB} ./vefs_recheck ${OUTPUT}"
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/uio_pci_generic/unbind
+	    echo "${PCIDEV}" | sudo tee /sys/bus/pci/drivers/nvme/bind
+            
+	    sleep 1
+	fi
+
+
+	if test 1 -eq 0 ; then
+	    rm -rf /home/sawamoto/ssd_mem
+	    dd if=/dev/zero of=/home/sawamoto/ssd_mem bs=1G count=10
+	    sudo sh -c "${TIME} ${GDB} ./vefs ${OUTPUT}"
+	    sudo sh -c "${TIME} ${GDB} ./vefs_recheck ${OUTPUT}"
+	    rm -rf /home/sawamoto/ssd_mem
+	fi
+    done
