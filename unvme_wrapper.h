@@ -47,7 +47,7 @@ static const bool kDummyWrite = false;
 class UnvmeWrapper
 {
 public:
-  UnvmeWrapper() : ns_(unvme_open("b3:00.0")), lock_(0)
+  UnvmeWrapper() : ns_(unvme_open("04:00.0")), lock_(0)
   {
     printf("qc=%d/%d qs=%d/%d bc=%#lx bs=%d maxbpio=%d\n", ns_->qcount,
            ns_->maxqcount, ns_->qsize, ns_->maxqsize, ns_->blockcount,
@@ -127,7 +127,7 @@ public:
   int ApollWithoutWait(unvme_iod_t iod)
   {
     Spinlock lock(lock_);
-    return ApollWithoutWait(iod);
+    return ApollWithoutWaitInternal(iod);
   }
   int Read(void *buf, u64 slba, u32 nlb)
   {
