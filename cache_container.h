@@ -31,7 +31,7 @@
 
 #include <stdint.h>
 #include <assert.h>
-#include "autogen.h"
+#include "vefs_autogen_conf.h"
 
 template <class Key, class Value>
 class SimpleHashCache
@@ -41,6 +41,7 @@ public:
   {
     Key k;
     Value v;
+    int signature;
   };
   class Iterator
   {
@@ -57,9 +58,10 @@ public:
     {
       return index_ == kEntryNum;
     }
-    Container *operator->()
+    Key GetKey()
     {
-      return &cache_->GetFromIndex(index_);
+      assert(!IsEnd());
+      return cache_->GetFromIndex(index_).k;
     }
     Iterator &operator=(Iterator it)
     {
@@ -83,6 +85,11 @@ public:
     SimpleHashCache *cache_;
     int index_;
   };
+  SimpleHashCache() {
+    for(int i = 0; i < kEntryNum; i++) {
+      container_[i].signature = 0xdeadbeef;
+    }
+  }
   void Put(Container &&obj, Container &old)
   {
     Container &c = container_[GetIndexFromKey(obj.k)];
@@ -94,39 +101,43 @@ public:
     c.k = obj.k;
     c.v.Reset(std::move(obj.v));
   }
-  Value *Get(Key key)
+  Value Get(Key key)
   {
     Container &ele = container_[GetIndexFromKey(key)];
     if (ele.v.IsValid() && key.Get() == ele.k.Get())
     {
-      return &ele.v;
+      return Value(std::move(ele.v));
     }
-    return nullptr;
+    return Value();
   }
   static int GetIndexFromKey(Key key)
   {
     return key.Get() % kEntryNum;
-  }
-  Container &GetFromIndex(int i)
-  {
-    return container_[i];
   }
   int GetNum()
   {
     int num = 0;
     for (int i = 0; i < kEntryNum; i++)
     {
-      num += container_[i].v.IsValid() ? 1 : 0;
+      if (container_[i].v.IsValid())
+      {
+        num++;
+      }
+      assert(container_[i].signature == 0xdeadbeef);
     }
     return num;
   }
 
-  #ifdef LARGE_CACHE
-  static const int kEntryNum = 2048;
-  #else
+#ifdef LARGE_CACHE
+  static const int kEntryNum = 4096;
+#else
   static const int kEntryNum = 256;
-  #endif
+#endif
 private:
+  Container &GetFromIndex(int i)
+  {
+    return container_[i];
+  }
   Container container_[kEntryNum];
 };
 

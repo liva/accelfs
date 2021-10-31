@@ -30,15 +30,15 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-OPTION="-g3 -O2 -DNDEBUG"
-#OPTION="-g3"
-echo "#ifndef VEFS_SCRIPT_AUTOGEN_H_" > autogen.h
-echo "#define VEFS_SCRIPT_AUTOGEN_H_" >> autogen.h
+#OPTION="-g3 -O2 -DNDEBUG"
+OPTION="-g3 -O2" # debug
+echo "#ifndef VEFS_AUTOGEN_CONF_H_" > vefs_autogen_conf.h
+echo "#define VEFS_AUTOGEN_CONF_H_" >> vefs_autogen_conf.h
 for OPT in ${1}
 do
-    echo "#define ${OPT}" >> autogen.h
+    echo "#define ${OPT}" >> vefs_autogen_conf.h
 done
-echo "#endif" >> autogen.h
+echo "#endif" >> vefs_autogen_conf.h
 docker run --rm -it -v $PWD:$PWD -w $PWD unvme:ve /opt/nec/nosupport/llvm-ve/bin/clang++ --target=ve-linux --std=c++11 $OPTION -c vefs.cc
 docker rm -f vefs || :
 docker run -d --name vefs -it -v $PWD:$PWD -w $PWD unvme:ve sh
@@ -47,11 +47,14 @@ docker exec -it vefs rm -f libvefs.a
 docker exec -it vefs /opt/nec/nosupport/llvm-ve/bin/llvm-ar rcs libvefs.a vefs.o
 docker exec -it vefs cp -r *.h /opt/nec/ve/include
 docker exec -it vefs cp -r *.h /opt/nec/ve/ex_include
+docker exec -it vefs mkdir -p /opt/nec/ve/include/common /opt/nec/ve/ex_include/common
+docker exec -it vefs cp -r common/*.h /opt/nec/ve/include/common
+docker exec -it vefs cp -r common/*.h /opt/nec/ve/ex_include/common
 docker exec -it vefs cp libvefs.a /opt/nec/ve/lib/
 docker exec -it vefs cp libvefs.a /opt/nec/ve/ex_lib/
 docker exec -it vefs cp vefs.cc /opt/nec/ve/ex_lib/
 docker commit vefs vefs:develop
 docker rm -f vefs
-rm -rf autogen.h
+rm -rf vefs_autogen_conf.h
 cd itest
-./run.sh
+#./run.sh

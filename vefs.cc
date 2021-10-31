@@ -76,8 +76,6 @@ void DumpTime()
     }
 }
 
-bool debug_flag = false; //debug
-
 std::deque<Inode::AsyncIoContext> Header::Write()
 {
     std::deque<Inode::AsyncIoContext> ctxs;
@@ -169,7 +167,7 @@ std::deque<Inode::AsyncIoContext> Header::Write()
     {
         ctxs.push_back(*it);
     }
-
+    
     updated_ = false;
     return ctxs;
 }

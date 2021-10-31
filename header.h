@@ -55,34 +55,57 @@ public:
         }
     }
     Header() = delete;
+    void SyncAllInodes()
+    {
+        {
+            Spinlock lock(lock_);
+            for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
+            {
+                Inode *inode = *itr;
+                {
+                    Spinlock lock(inode->GetLock());
+                    inode->CacheListSync();
+                    inode->SyncChunkList();
+                }
+            }
+            for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
+            {
+                Inode *inode = *itr;
+                {
+                    Spinlock lock(inode->GetLock());
+                    inode->WaitIoCompletion();
+                }
+            }
+        }
+        WriteSync();
+    }
     void Release()
     {
-        assert(!updated_);
-        Spinlock lock(lock_);
-        int i = 0;
-        for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
         {
-            Inode *inode = *itr;
+            Spinlock lock(lock_);
+            for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
             {
-                Spinlock ilock(inode->GetLock());
-                inode->CacheListSync();
-                inode->SyncChunkList();
+                Inode *inode = *itr;
+                {
+                    Spinlock lock(inode->GetLock());
+                    bool inode_updated = inode->IsUpdated();
+                    assert(!inode_updated);
+                    inode->Release();
+                }
             }
         }
-        for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
+        WriteSync();
         {
-            Inode *inode = *itr;
+            Spinlock lock(lock_);
+            assert(!updated_);
+            for (auto itr = inodes_.begin(); itr != inodes_.end(); ++itr)
             {
-                Spinlock ilock(inode->GetLock());
-                inode->WaitIoCompletion();
-                bool inode_updated = inode->IsUpdated();
-                assert(!inode_updated);
-                inode->Release();
+                Inode *inode = *itr;
+                delete inode;
             }
-            delete inode;
+            inodes_.clear();
+            //HardWrite();
         }
-        inodes_.clear();
-        //HardWrite();
     }
     ~Header()
     {
@@ -272,7 +295,7 @@ private:
     static const u64 kChunkmapStartPos = kHeaderStartPos + kChunkSize;
     static const u64 kDataStorageStartPos = kChunkmapStartPos + Chunkmap::kSize;
     UnvmeWrapper &ns_wrapper_;
-  StaticAllocator<DmaBufferWrapper> dmabuf_allocator_;
+    StaticAllocator<DmaBufferWrapper> dmabuf_allocator_;
     std::atomic<int> lock_;
     std::vector<Inode *> inodes_;
     static const char *kVersionString;

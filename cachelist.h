@@ -40,46 +40,41 @@ class CacheList
 {
 public:
     using Vector = std::vector<std::pair<ChunkIndex, Cache>>;
-    ~CacheList()
-    {
-        assert(available_ == 0);
-    }
     void Truncate(size_t len)
     {
-        for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
+        for (CacheContainer::Iterator it = container_wrapper_.GetFirstIterator();
              !it.IsEnd(); it = it.Next())
         {
-            Cache &c = it->v;
-            assert(c.IsValid());
-            ChunkIndex cindex = it->k;
+            ChunkIndex cindex = it.GetKey();
             if (cindex.GetPos() >= len)
             {
+                Cache c = container_wrapper_.Get(cindex);
+                assert(c.IsValid());
                 c.ForceRelease();
-                available_--;
             }
         }
     }
     void Release()
     {
-        for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
+        for (CacheContainer::Iterator it = container_wrapper_.GetFirstIterator();
              !it.IsEnd(); it = it.Next())
         {
-            Cache &cache = it->v;
-            assert(cache.IsValid());
-            assert(!cache.IsWriteNeeded());
-            cache.Release();
-            available_--;
+            ChunkIndex cindex = it.GetKey();
+            Cache c = container_wrapper_.Get(cindex);
+            assert(c.IsValid());
+            assert(!c.IsWriteNeeded());
+            c.Release();
         }
-        assert(CacheContainer::Iterator(container_).IsEnd());
-        assert(available_ == 0);
+        assert(container_wrapper_.IsEmpty());
     }
 
     bool CheckIfExistAndIncCnt(ChunkIndex cindex)
     {
-        Cache *c = container_.Get(cindex);
-        if (c != nullptr)
+        Cache c = container_wrapper_.Get(cindex);
+        if (c.IsValid())
         {
-            c->SetTicket(cache_ticket_);
+            c.SetTicket(cache_ticket_);
+            container_wrapper_.PutToEmptyEntry(cindex, std::move(c));
             cache_ticket_++;
             return true;
         }
@@ -87,22 +82,23 @@ public:
     }
     void Refresh(ChunkIndex cindex, const char *buf, size_t offset, size_t n)
     {
-        Cache *c = container_.Get(cindex);
-        assert(c != nullptr);
-        c->Refresh(buf, offset, n);
+        Cache c = container_wrapper_.Get(cindex);
+        assert(c.IsValid());
+        c.Refresh(buf, offset, n);
+        container_wrapper_.PutToEmptyEntry(cindex, std::move(c));
     }
     void Apply(ChunkIndex cindex, char *buf, size_t offset, size_t n)
     {
-        Cache *c = container_.Get(cindex);
-        assert(c != nullptr);
-        c->Apply(buf, offset, n);
+        Cache c = container_wrapper_.Get(cindex);
+        assert(c.IsValid());
+        c.Apply(buf, offset, n);
+        container_wrapper_.PutToEmptyEntry(cindex, std::move(c));
     }
     void ForceRelease(ChunkIndex cindex)
     {
-        Cache *c = container_.Get(cindex);
-        assert(c != nullptr);
-        c->ForceRelease();
-        available_--;
+        Cache c = container_wrapper_.Get(cindex);
+        assert(c.IsValid());
+        c.ForceRelease();
     }
     // element should be released in advance
     int RegisterToCache(const int num, ChunkIndex cindex, SharedDmaBuffer &&dma, bool needs_written, std::pair<ChunkIndex, Cache> *release_cache_list)
@@ -112,24 +108,20 @@ public:
         for (int i = 0; i < num; i++)
         {
             CacheContainer::Container old;
-            container_.Put(CacheContainer::Container{cindex, Cache(cache_ticket_, dma, buf_offset, needs_written)}, old);
+            container_wrapper_.Put(cindex, Cache(cache_ticket_, dma, buf_offset, needs_written), old);
             if (old.v.IsValid())
             {
                 // flush current cache
                 if (old.v.IsWriteNeeded())
                 {
-                  release_cache_list[cnt].first = old.k;
-                  new (&release_cache_list[cnt].second)Cache(std::move(old.v));
-                  cnt++;
+                    release_cache_list[cnt].first = old.k;
+                    new (&release_cache_list[cnt].second) Cache(std::move(old.v));
+                    cnt++;
                 }
                 else
                 {
                     old.v.Release();
                 }
-            }
-            else
-            {
-                available_++;
             }
             cindex = ChunkIndex::CreateFromIndex(cindex.Get() + 1);
             buf_offset += kChunkSize;
@@ -141,20 +133,19 @@ public:
     {
         for (auto it = incoming_indexes.begin(); it != incoming_indexes.end(); ++it)
         {
-            CacheContainer::Container &pair = container_.GetFromIndex(CacheContainer::GetIndexFromKey(*it));
-            Cache &c = pair.v;
+            ChunkIndex cindex = *it;
+            Cache c = container_wrapper_.Get(cindex);
             if (c.IsValid())
             {
                 // flush current cache
                 if (c.IsWriteNeeded())
                 {
-                    release_cache_list.push_back(std::move(std::make_pair(pair.k, std::move(pair.v))));
+                    release_cache_list.push_back(std::move(std::make_pair(cindex, std::move(c))));
                 }
                 else
                 {
                     c.Release();
                 }
-                available_--;
             }
         }
     }
@@ -164,7 +155,7 @@ public:
         {
             keep_num = 32;
         }
-        if (available_ < keep_num * 2)
+        if (container_wrapper_.GetAvailableNum() < keep_num * 2)
         {
             return;
         }
@@ -173,45 +164,92 @@ public:
             return;
         }
         uint64_t border_ticket = cache_ticket_ - keep_num;
-        for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
+        for (CacheContainer::Iterator it = container_wrapper_.GetFirstIterator();
              !it.IsEnd(); it = it.Next())
         {
-            Cache &c = it->v;
+            ChunkIndex cindex = it.GetKey();
+            Cache c = container_wrapper_.Get(cindex);
             assert(c.IsValid());
             if (c.GetTicket() <= border_ticket)
             {
-                ChunkIndex index = it->k;
-
                 // flush current cache
                 if (c.IsWriteNeeded())
                 {
-                    release_cache_list.push_back(std::move(std::make_pair(it->k, std::move(it->v))));
+                    release_cache_list.push_back(std::move(std::make_pair(cindex, std::move(c))));
                 }
                 else
                 {
                     c.Release();
                 }
-                available_--;
             }
         }
     }
 
     void CacheListSync(Vector &sync_cache_list)
     {
-        for (CacheContainer::Iterator it = CacheContainer::Iterator(container_);
+        for (CacheContainer::Iterator it = container_wrapper_.GetFirstIterator();
              !it.IsEnd(); it = it.Next())
         {
-            assert(it->v.IsValid());
-            sync_cache_list.push_back(std::move(std::make_pair(it->k, std::move(it->v))));
-            available_--;
+            ChunkIndex cindex = it.GetKey();
+            Cache c = container_wrapper_.Get(cindex);
+            assert(c.IsValid());
+            sync_cache_list.push_back(std::move(std::make_pair(cindex, std::move(c))));
         }
-        assert(available_ == 0);
-        assert(CacheContainer::Iterator(container_).IsEnd());
+        assert(container_wrapper_.IsEmpty());
     }
 
 private:
     using CacheContainer = SimpleHashCache<ChunkIndex, Cache>;
-    CacheContainer container_;
+    class CacheContainerWrapper
+    {
+    public:
+        CacheContainerWrapper() {}
+        CacheContainerWrapper(const CacheContainerWrapper &obj) = delete;
+        CacheContainerWrapper &operator=(const CacheContainerWrapper &obj) = delete;
+        ~CacheContainerWrapper()
+        {
+            assert(available_ == 0);
+        }
+        int GetAvailableNum() const
+        {
+            return available_;
+        }
+        Cache Get(ChunkIndex cindex)
+        {
+            Cache c = container_.Get(cindex);
+            if (c.IsValid())
+            {
+                available_--;
+            }
+            return c;
+        }
+        void Put(ChunkIndex cindex, Cache &&c, CacheContainer::Container &old)
+        {
+            container_.Put(CacheContainer::Container{cindex, std::move(c)}, old);
+            if (!old.v.IsValid())
+            {
+                available_++;
+            }
+        }
+        void PutToEmptyEntry(ChunkIndex cindex, Cache &&c)
+        {
+            available_++;
+            CacheContainer::Container old;
+            container_.Put(CacheContainer::Container{cindex, std::move(c)}, old);
+            assert(!old.v.IsValid());
+        }
+        CacheContainer::Iterator GetFirstIterator()
+        {
+            return CacheContainer::Iterator(container_);
+        }
+        bool IsEmpty()
+        {
+            return GetFirstIterator().IsEnd() && (available_ == 0);
+        }
+
+    private:
+        CacheList::CacheContainer container_;
+        int available_ = 0;
+    } container_wrapper_;
     uint64_t cache_ticket_ = 0;
-    int available_ = 0;
 };
