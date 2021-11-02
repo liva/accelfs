@@ -57,4 +57,4 @@ docker commit vefs vefs:develop
 docker rm -f vefs
 rm -rf vefs_autogen_conf.h
 cd itest
-#./run.sh
+./run.sh
